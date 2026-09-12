@@ -5,7 +5,7 @@ import json
 import time
 
 from .storage import Project
-from .models import Chapter, Character, Location, PlotThread, Promise, beat_text, beat_requires, beat_establishes
+from .models import Chapter, Character, Location, Memory, Motif, PlotThread, Promise, beat_text, beat_requires, beat_establishes
 from .depgraph import build_dependency_graph, check_dependencies
 from .llm import LLMClient, DEFAULT_MODEL
 from .pipeline import (
@@ -236,6 +236,17 @@ def cmd_bible_show(args):
     for p in state.promises.values():
         due = f", due by {p.due_by}" if p.due_by else ""
         print(f"  - [{p.status}] {p.id}: {p.description} (planted in {p.planted_in or '?'}{due})")
+    print("Motifs:")
+    for m in state.motifs.values():
+        first = f", first used in {m.first_used_in}" if m.first_used_in else ""
+        print(f"  - {m.id}: \"{m.phrase}\"{first}")
+        if m.notes:
+            print(f"      {m.notes}")
+    print("Memories:")
+    for mem in state.memories.values():
+        about = f" re: {mem.about}" if mem.about else ""
+        print(f"  - [{mem.status}] {mem.id}: {mem.subject}{about} -- {mem.event}")
+        print(f"      effect: {mem.effect}")
     print("\nRunning summary:\n" + (state.running_summary or "(empty)"))
 
 
@@ -261,6 +272,57 @@ def cmd_bible_add_thread(args):
     state.plot_threads[args.id] = PlotThread(id=args.id, description=args.description)
     project.save_state(state)
     print(f"Added plot thread: {args.id}")
+
+
+def cmd_bible_add_motif(args):
+    """A recurring phrase/image meant to gain weight each time it resurfaces -- distinct from a
+    promise (a setup awaiting a specific payoff): a motif isn't resolved, it's reinforced. Pinned
+    into every chapter's context from here on (context.py's _build_motifs_block)."""
+    project = Project(args.root)
+    state = project.load_state()
+    state.motifs[args.id] = Motif(id=args.id, phrase=args.phrase, notes=args.notes or "")
+    project.save_state(state)
+    print(f"Added motif: {args.id}")
+
+
+def cmd_motif_remove(args):
+    Project(args.root).remove_motif(args.id)
+    print(f"Removed motif: {args.id}")
+
+
+def cmd_motif_rename(args):
+    Project(args.root).rename_motif(args.old, args.new)
+    print(f"Renamed motif '{args.old}' -> '{args.new}'.")
+
+
+def cmd_bible_add_memory(args):
+    """The Telltale-games mechanic ("X will remember that"): a specific past incident that keeps
+    shaping how `subject` treats `about` going forward -- distinct from a promise (resolves once,
+    to the reader) and from a character_update (overall status, not a per-relationship steer).
+    Pinned into context whenever subject is relevant (context.py's _build_memories_block)."""
+    project = Project(args.root)
+    state = project.load_state()
+    state.memories[args.id] = Memory(
+        id=args.id, subject=args.subject, about=args.about or "", event=args.event,
+        effect=args.effect, chapter_id=args.chapter,
+    )
+    project.save_state(state)
+    print(f"Added memory: {args.id}")
+
+
+def cmd_memory_remove(args):
+    Project(args.root).remove_memory(args.id)
+    print(f"Removed memory: {args.id}")
+
+
+def cmd_memory_rename(args):
+    Project(args.root).rename_memory(args.old, args.new)
+    print(f"Renamed memory '{args.old}' -> '{args.new}'.")
+
+
+def cmd_memory_resolve(args):
+    Project(args.root).resolve_memory(args.id)
+    print(f"Resolved memory: {args.id}")
 
 
 def cmd_bible_set_style(args):
@@ -504,7 +566,7 @@ def cmd_outline_add(args):
     beats = [b.strip() for b in args.beats.split("|") if b.strip()]
     chapters.append(Chapter(
         id=args.id, title=args.title, pov=args.pov or "", beats=beats, word_target=args.words,
-        structural_beat=args.structural_beat or None,
+        structural_beat=args.structural_beat or None, frame_of=args.frame_of or None,
     ))
     project.save_outline(chapters)
     print(f"Added chapter outline: {args.id}")
@@ -514,7 +576,8 @@ def cmd_outline_show(args):
     chapters = Project(args.root).load_outline()
     for c in chapters:
         beat_tag = f", beat: {c.structural_beat}" if c.structural_beat else ""
-        print(f"[{c.status:>8}] {c.id}: {c.title} (POV: {c.pov or '-'}, ~{c.word_target}w{beat_tag})")
+        frame_tag = f", framed within: {c.frame_of}" if c.frame_of else ""
+        print(f"[{c.status:>8}] {c.id}: {c.title} (POV: {c.pov or '-'}, ~{c.word_target}w{beat_tag}{frame_tag})")
         for b in c.beats:
             print(f"      - {beat_text(b)}")
             requires, establishes = beat_requires(b), beat_establishes(b)
@@ -630,6 +693,11 @@ def cmd_graph_show(args):
         print("  (none)")
     for e in ref_edges:
         print(f"  {e.source} -> {e.target}")
+    frame_edges = [e for e in edges if e.kind == "frames"]
+    if frame_edges:
+        print("\nFrame narratives (chapter -> the chapter it's narrated from within):")
+        for e in frame_edges:
+            print(f"  {e.source} -> {e.target}")
 
 
 def cmd_generate(args):
@@ -775,6 +843,43 @@ def build_parser():
     sp.add_argument("new")
     sp.set_defaults(func=cmd_thread_rename)
 
+    sp = sub.add_parser("bible-add-motif", help="A recurring phrase/image meant to gain weight each time it resurfaces, pinned into every chapter's context from here on.")
+    sp.add_argument("id")
+    sp.add_argument("phrase", help="The recurring line/image itself, verbatim")
+    sp.add_argument("--notes", default="", help="What it means / why it should recur")
+    sp.set_defaults(func=cmd_bible_add_motif)
+
+    sp = sub.add_parser("motif-remove")
+    sp.add_argument("id")
+    sp.set_defaults(func=cmd_motif_remove)
+
+    sp = sub.add_parser("motif-rename")
+    sp.add_argument("old")
+    sp.add_argument("new")
+    sp.set_defaults(func=cmd_motif_rename)
+
+    sp = sub.add_parser("bible-add-memory", help="The Telltale-games mechanic ('X will remember that'): a specific past incident that keeps shaping how subject treats about going forward.")
+    sp.add_argument("id")
+    sp.add_argument("subject", help="The character whose future behavior is affected")
+    sp.add_argument("about", help="Who/what it concerns -- usually another character's name; pass '' for general")
+    sp.add_argument("event", help="What happened, briefly")
+    sp.add_argument("effect", help="How subject should act differently toward about going forward")
+    sp.add_argument("--chapter", default=None, help="Chapter id where this happened")
+    sp.set_defaults(func=cmd_bible_add_memory)
+
+    sp = sub.add_parser("memory-remove")
+    sp.add_argument("id")
+    sp.set_defaults(func=cmd_memory_remove)
+
+    sp = sub.add_parser("memory-rename")
+    sp.add_argument("old")
+    sp.add_argument("new")
+    sp.set_defaults(func=cmd_memory_rename)
+
+    sp = sub.add_parser("memory-resolve", help="Marks a memory resolved (a grudge forgiven, trust repaired) -- stops it being pinned into context.")
+    sp.add_argument("id")
+    sp.set_defaults(func=cmd_memory_resolve)
+
     sp = sub.add_parser("bible-set-style")
     sp.add_argument("text")
     sp.set_defaults(func=cmd_bible_set_style)
@@ -862,6 +967,7 @@ def build_parser():
     sp.add_argument("--words", type=int, default=2500)
     sp.add_argument("--beats", default="", help="Pipe-separated list of beats, e.g. 'She arrives|They argue|She leaves'")
     sp.add_argument("--structural-beat", default="", help="Genre beat id this chapter serves, see `genre-show`")
+    sp.add_argument("--frame-of", default="", help="Another chapter id this one is narrated from within (e.g. a flashback framed by a present-day chapter)")
     sp.set_defaults(func=cmd_outline_add)
 
     sp = sub.add_parser("outline-show")

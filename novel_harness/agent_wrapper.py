@@ -24,7 +24,7 @@ from typing import Any, Callable
 
 from .depgraph import build_dependency_graph, check_dependencies
 from .llm import DEFAULT_MODEL, LLMClient
-from .models import Character, Chapter, Location, PlotThread, Promise
+from .models import Character, Chapter, Location, Memory, Motif, PlotThread, Promise
 from .pipeline import (
     apply_genre, audit_manuscript, continue_and_extract, generate_chapter, generate_character_sheet,
     generate_title, plan_book, plan_outline,
@@ -112,6 +112,16 @@ class AgentSession:
             if not pid:
                 raise ValueError(f"promise update requires 'id': {value!r}")
             state.promises[pid] = _merge_into(state.promises.get(pid), Promise, value)
+        for value in data.get("motifs", []):
+            mid = value.get("id")
+            if not mid:
+                raise ValueError(f"motif update requires 'id': {value!r}")
+            state.motifs[mid] = _merge_into(state.motifs.get(mid), Motif, value)
+        for value in data.get("memories", []):
+            mid = value.get("id")
+            if not mid:
+                raise ValueError(f"memory update requires 'id': {value!r}")
+            state.memories[mid] = _merge_into(state.memories.get(mid), Memory, value)
         self.project.save_state(state)
         return self.snapshot()
 
@@ -131,13 +141,15 @@ class AgentSession:
             "location": self.project.remove_location,
             "plot_thread": self.project.remove_thread,
             "promise": self.project.remove_promise,
+            "motif": self.project.remove_motif,
+            "memory": self.project.remove_memory,
         }
         if kind == "chapter":
             removed = self.project.remove_chapter(id, force=force)
         elif kind in removers:
             removed = removers[kind](id)
         else:
-            raise ValueError(f"Unknown kind '{kind}' (expected character|location|plot_thread|promise|chapter)")
+            raise ValueError(f"Unknown kind '{kind}' (expected character|location|plot_thread|promise|motif|memory|chapter)")
         return {"removed_kind": kind, "removed": asdict(removed), "snapshot": self.snapshot()}
 
     def rename(self, kind: str, old_id: str, new_id: str) -> dict:
@@ -146,15 +158,21 @@ class AgentSession:
             "location": self.project.rename_location,
             "plot_thread": self.project.rename_thread,
             "promise": self.project.rename_promise,
+            "motif": self.project.rename_motif,
+            "memory": self.project.rename_memory,
         }
         if kind not in renamers:
-            raise ValueError(f"Unknown kind '{kind}' (expected character|location|plot_thread|promise)")
+            raise ValueError(f"Unknown kind '{kind}' (expected character|location|plot_thread|promise|motif|memory)")
         renamed = renamers[kind](old_id, new_id)
         return {"renamed_kind": kind, "renamed": asdict(renamed), "snapshot": self.snapshot()}
 
     def promise_resolve(self, promise_id: str, chapter_id: str) -> dict:
         promise = self.project.resolve_promise(promise_id, chapter_id)
         return {"promise": asdict(promise)}
+
+    def memory_resolve(self, memory_id: str) -> dict:
+        memory = self.project.resolve_memory(memory_id)
+        return {"memory": asdict(memory)}
 
     def continuity_resolve(self, index: int) -> dict:
         flag = self.project.resolve_continuity_flag(index)
@@ -287,7 +305,7 @@ class AgentSession:
 
 _ACTIONS = [
     "init", "snapshot", "update_bible", "add_chapters", "update_chapter", "remove", "rename",
-    "promise_resolve", "continuity_resolve", "voice_search", "voice_assign", "character_generate",
+    "promise_resolve", "memory_resolve", "continuity_resolve", "voice_search", "voice_assign", "character_generate",
     "title_generate", "dependency_graph", "dependency_check", "plan", "commit", "generate",
     "continue_chapter", "audit",
 ]
@@ -305,6 +323,7 @@ def _dispatch(session: AgentSession, action: str, payload: dict) -> dict:
     if action == "remove": return session.remove(payload["kind"], payload["id"], bool(payload.get("force", False)))
     if action == "rename": return session.rename(payload["kind"], payload["old_id"], payload["new_id"])
     if action == "promise_resolve": return session.promise_resolve(payload["id"], payload["chapter_id"])
+    if action == "memory_resolve": return session.memory_resolve(payload["id"])
     if action == "continuity_resolve": return session.continuity_resolve(int(payload["index"]))
     if action == "voice_search":
         return session.voice_search(

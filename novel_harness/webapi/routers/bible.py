@@ -48,3 +48,15 @@ def resolve_promise(project_id: str, promise_id: str, payload: dict = Body(...))
         return session.promise_resolve(promise_id, payload["chapter_id"])
     except Exception as error:  # noqa: BLE001
         raise as_http_error(error) from error
+
+
+@router.post("/memories/{memory_id}/resolve")
+def resolve_memory(project_id: str, memory_id: str):
+    """Marks a memory resolved (a grudge forgiven, trust repaired) -- see
+    AgentSession.memory_resolve. Unlike promise resolution this needs no chapter_id: a memory isn't
+    tied to a specific payoff chapter the way a promise is."""
+    session = get_session(project_id)
+    try:
+        return session.memory_resolve(memory_id)
+    except Exception as error:  # noqa: BLE001
+        raise as_http_error(error) from error

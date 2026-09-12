@@ -45,6 +45,27 @@ class Promise:
 
 
 @dataclass
+class Memory:
+    """The Telltale-games mechanic ("Clementine will remember that"): a specific past incident
+    between characters that keeps shaping how one treats the other, distinct from both a Promise
+    (a setup that resolves once, to the reader) and a general Character.status update (the
+    character's overall current situation, not a per-relationship consequence). `subject` is whose
+    behavior is affected; `about` is who/what it concerns (another character, typically); `effect`
+    is the behavioral instruction pinned into context whenever `subject` is relevant (context.py's
+    _build_memories_block) -- not just a fact for the record, an active steer on how `subject`
+    should act. Auto-proposed by extraction (extract_and_update_state's new_memories) the same way
+    new_promises already is, or added by hand (bible-add-memory)."""
+    id: str
+    subject: str                      # the character whose future behavior is affected
+    about: str                        # who/what it concerns -- usually another character name, may be blank
+    event: str                        # what happened, briefly
+    effect: str                       # how it should shape subject's behavior toward `about` going forward
+    chapter_id: Optional[str] = None  # where this happened
+    status: str = "active"            # active | resolved (a grudge forgiven, trust repaired, etc.)
+    origin: str = "manual"            # manual | auto -- mirrors Promise.origin's convention
+
+
+@dataclass
 class Chapter:
     id: str
     title: str
@@ -61,6 +82,12 @@ class Chapter:
     status: str = "planned"   # planned | drafted | revised | final
     file: Optional[str] = None
     structural_beat: Optional[str] = None  # references an id in ProjectState.genre_beats
+    frame_of: Optional[str] = None  # another chapter id this one is narrated FROM/WITHIN -- e.g. a
+                                     # present-day frame chapter that a flashback chapter sits
+                                     # inside (Barnaby-style: an old man remembering, a journalist
+                                     # interviewing). Purely a structural/context-assembly hint --
+                                     # see context.py's frame block and depgraph.py's "frames" edge.
+                                     # None (the common case) means an ordinary, unframed chapter.
 
 
 def beat_text(beat: Union[str, Dict[str, Any]]) -> str:
@@ -77,6 +104,20 @@ def beat_requires(beat: Union[str, Dict[str, Any]]) -> List[str]:
 def beat_establishes(beat: Union[str, Dict[str, Any]]) -> List[str]:
     """Entity refs this beat authors as newly established -- empty for a plain-string beat."""
     return [] if isinstance(beat, str) else list(beat.get("establishes", []))
+
+
+@dataclass
+class Motif:
+    """A recurring phrase or image meant to gain weight each time it resurfaces (the "Still us?" /
+    "Always" refrain craft technique) -- distinct from a Promise (which is a setup awaiting a
+    specific payoff) and from a PlotThread (an ongoing plot line): a motif isn't "resolved," it's
+    *reinforced*, and its value comes from repetition with escalating stakes, not from a single
+    payoff moment. Pinned into every chapter's context (context.py) from first_used_in onward so
+    the model actually has the chance to bring it back rather than using it once and forgetting it."""
+    id: str
+    phrase: str                       # the recurring line/image itself, verbatim, e.g. "Still us? / Always."
+    notes: str = ""                   # what it means / why it should recur, for the model and the author
+    first_used_in: Optional[str] = None  # a chapter id, or None if planted before any chapter is drafted
 
 
 @dataclass
@@ -98,6 +139,8 @@ class ProjectState:
     locations: Dict[str, Location] = field(default_factory=dict)
     plot_threads: Dict[str, PlotThread] = field(default_factory=dict)
     promises: Dict[str, Promise] = field(default_factory=dict)
+    motifs: Dict[str, Motif] = field(default_factory=dict)
+    memories: Dict[str, Memory] = field(default_factory=dict)
 
     # Genre profile -- populated by `genre-set`, a copy of a preset (see genres.py)
     # that the project can then diverge from freely.
@@ -127,6 +170,8 @@ class ProjectState:
             "locations": {k: asdict(v) for k, v in self.locations.items()},
             "plot_threads": {k: asdict(v) for k, v in self.plot_threads.items()},
             "promises": {k: asdict(v) for k, v in self.promises.items()},
+            "motifs": {k: asdict(v) for k, v in self.motifs.items()},
+            "memories": {k: asdict(v) for k, v in self.memories.items()},
             "genre_id": self.genre_id,
             "genre_beats": self.genre_beats,
             "tropes_embrace": self.tropes_embrace,
@@ -148,6 +193,8 @@ class ProjectState:
             locations={k: Location(**v) for k, v in d.get("locations", {}).items()},
             plot_threads={k: PlotThread(**v) for k, v in d.get("plot_threads", {}).items()},
             promises={k: Promise(**v) for k, v in d.get("promises", {}).items()},
+            motifs={k: Motif(**v) for k, v in d.get("motifs", {}).items()},
+            memories={k: Memory(**v) for k, v in d.get("memories", {}).items()},
             genre_id=d.get("genre_id"),
             genre_beats=d.get("genre_beats", []),
             tropes_embrace=d.get("tropes_embrace", []),

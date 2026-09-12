@@ -62,7 +62,8 @@ export function Plan() {
       await saveEdits()
       await commitPlan(projectId, wholeBook)
       setProposalText('')
-      navigate(`/projects/${projectId}/outline`)
+      // Back to the main workspace -- the committed chapters now show up in the chapter rail.
+      navigate(`/projects/${projectId}`)
     } catch (err) {
       setError(String(err))
     }

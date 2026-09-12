@@ -5,28 +5,20 @@ import './index.css'
 import { JobsProvider } from './JobsContext'
 import { JobTray } from './components/JobTray'
 import { Library } from './pages/Library'
-import { ProjectLayout } from './pages/ProjectLayout'
-import { Dashboard } from './pages/Dashboard'
-import { Characters } from './pages/Characters'
-import { Outline } from './pages/Outline'
-import { ChapterDetail } from './pages/ChapterDetail'
-import { Plan } from './pages/Plan'
-import { Continuity } from './pages/Continuity'
+import { Workspace } from './pages/Workspace'
 
+// The manuscript is the primary surface: both project routes render Workspace, which resolves
+// which chapter to show (explicit :chapterId, else the last one this browser had open, else the
+// first in outline order) and hosts Characters/Story(Dashboard)/Plan/Continuity as drawers rather
+// than separate destinations -- see Workspace.tsx.
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <JobsProvider>
       <BrowserRouter>
         <Routes>
           <Route path="/" element={<Library />} />
-          <Route path="/projects/:projectId" element={<ProjectLayout />}>
-            <Route index element={<Dashboard />} />
-            <Route path="characters" element={<Characters />} />
-            <Route path="outline" element={<Outline />} />
-            <Route path="outline/:chapterId" element={<ChapterDetail />} />
-            <Route path="plan" element={<Plan />} />
-            <Route path="continuity" element={<Continuity />} />
-          </Route>
+          <Route path="/projects/:projectId" element={<Workspace />} />
+          <Route path="/projects/:projectId/chapters/:chapterId" element={<Workspace />} />
         </Routes>
         <JobTray />
       </BrowserRouter>

@@ -69,6 +69,10 @@ export const resolvePromise = (id: string, promiseId: string, chapterId: string)
     method: 'POST',
     body: json({ chapter_id: chapterId }),
   })
+export const resolveMemory = (id: string, memoryId: string) =>
+  request<Record<string, unknown>>(`/api/projects/${id}/memories/${memoryId}/resolve`, {
+    method: 'POST',
+  })
 
 // ---- outline ----
 export const addChapters = (id: string, chapters: Partial<Chapter>[]) =>

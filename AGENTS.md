@@ -21,20 +21,31 @@ Supported actions:
 - `snapshot`: return the bible, outline, continuity log, and pending proposals. Each continuity
   flag's position in the `continuity` array returned here is its `index` for `continuity_resolve`.
 - `update_bible`: **partial update** — merges `genre`, `tags`, `style_guide`, `target_chapters`,
-  and arrays of `characters`, `locations`, `plot_threads`, or `promises` into the existing bible.
-  Each character/location entry is keyed by `name`, each plot_thread/promise by `id`; only the
-  fields you actually pass on an existing entry change (e.g. `{"characters":[{"name":"Mira Voss","voice_notes":"..."}]}`
-  updates only `voice_notes`, leaving `description`/`status`/etc. untouched) — a `name`/`id` that
-  doesn't exist yet creates a new entry instead. `genre` is always free text, never a fixed list:
-  a handful of built-in beat-sheets (thriller/romance/mystery/horror/epic_fantasy/literary/three_act)
-  get cloned in for free if your wording happens to match one exactly; anything else, the model
-  generates an equivalent bespoke beat-sheet for whatever you typed, so every genre gets real
-  structural guidance, not just those few (this makes one model call when nothing matches).
+  and arrays of `characters`, `locations`, `plot_threads`, `promises`, `motifs`, or `memories` into
+  the existing bible. Each character/location entry is keyed by `name`, each plot_thread/promise/
+  motif/memory by `id`; only the fields you actually pass on an existing entry change (e.g.
+  `{"characters":[{"name":"Mira Voss","voice_notes":"..."}]}` updates only `voice_notes`, leaving
+  `description`/`status`/etc. untouched) — a `name`/`id` that doesn't exist yet creates a new entry
+  instead. A memory is `{"id":"...", "subject":"<character whose future behavior is affected>",
+  "about":"<who/what it concerns, usually another character>", "event":"<what happened>",
+  "effect":"<how subject should act differently toward about going forward>", "chapter_id":"...",
+  "status":"active|resolved"}` — the Telltale-games "X will remember that" mechanic: a specific
+  incident that keeps shaping how one character treats another, pinned into that character's
+  context whenever relevant (see `dependency_graph`'s sibling, context assembly) until resolved.
+  A motif is `{"id":"...", "phrase":"...", "notes":"...", "first_used_in":"<chapter id or null>"}`
+  — a recurring line/image meant to resurface with more weight each time, always pinned into every
+  chapter's context from `first_used_in` onward (unlike promises, which are relevance-filtered).
+  `genre` is always free text, never a fixed list: a handful of built-in beat-sheets
+  (thriller/romance/mystery/horror/epic_fantasy/literary/three_act) get cloned in for free if your
+  wording happens to match one exactly; anything else, the model generates an equivalent bespoke
+  beat-sheet for whatever you typed, so every genre gets real structural guidance, not just those
+  few (this makes one model call when nothing matches).
 - `add_chapters`: append explicit chapter objects. Each needs `id` and `title`; use `beats`, `pov`, `word_target`, and `structural_beat` when available. Errors if an `id` already exists -- use `update_chapter` to edit one. Each entry in `beats` may be a plain string (checked only by substring inference) or `{"text":"...", "requires":["character:Name", ...], "establishes":["promise:some-id", ...]}` to author an exact dependency edge instead -- refs are `kind:name-or-id` with kind one of character/location/plot_thread/promise. `plan`/`commit` already emit this shape for you; hand-authoring it yourself here is more reliable than counting on the (9B, local) model to.
 - `update_chapter`: partial update of an existing chapter. `{"chapter_id":"ch01", ...fields}` merges `title`/`pov`/`beats`/`word_target`/`structural_beat`/`status` (only the fields given); `id`/`file` can't be changed this way.
-- `remove`: delete a bible entry or a chapter. `{"kind":"character|location|plot_thread|promise|chapter", "id":"...", "force":false}`. Deleting a chapter that's already drafted/revised/final is refused unless `force:true`, which also deletes its manuscript file. Removing an entry does not rewrite beat text, manuscript prose, or other entries that reference its id/name -- dangling references are left as-is.
-- `rename`: `{"kind":"character|location|plot_thread|promise", "old_id":"...", "new_id":"..."}`. Renaming a character also updates every chapter's `pov` that referenced the old name; it does not rewrite beat text or manuscript prose. Chapters can't be renamed (their id is also their filename and is referenced by other records) -- remove and re-add instead.
+- `remove`: delete a bible entry or a chapter. `{"kind":"character|location|plot_thread|promise|motif|memory|chapter", "id":"...", "force":false}`. Deleting a chapter that's already drafted/revised/final is refused unless `force:true`, which also deletes its manuscript file. Removing an entry does not rewrite beat text, manuscript prose, or other entries that reference its id/name -- dangling references are left as-is.
+- `rename`: `{"kind":"character|location|plot_thread|promise|motif|memory", "old_id":"...", "new_id":"..."}`. Renaming a character also updates every chapter's `pov` that referenced the old name; it does not rewrite beat text or manuscript prose. Chapters can't be renamed (their id is also their filename and is referenced by other records) -- remove and re-add instead.
 - `promise_resolve`: `{"id":"...", "chapter_id":"..."}` marks a promise paid in the given chapter.
+- `memory_resolve`: `{"id":"..."}` marks a memory resolved (a grudge forgiven, trust repaired) -- it stops being pinned into context but stays in the bible as a record.
 - `continuity_resolve`: `{"index":<int>}` marks one continuity flag resolved, by its position in the array `snapshot`/the continuity log returns (stable -- flags are only ever appended).
 - `voice_search`: `{"query":"", "gender":null, "age":null, "accent":null, "language":null, "limit":20}` searches the ~11K-entry TTS voice catalog. No extra dependencies needed.
 - `voice_assign`: `{"target":"narrator"|"<character name>", "voice_id":"..."}` assigns a catalog voice, downloading and transcribing its reference clip now. **Requires the optional narration dependencies** (`soundfile`, `librosa`, `torch`, `torchaudio`, `transformers` -- see `requirements.txt`); without them this raises a normal structured error, not a crash. A narrator voice must be assigned before `generate`'s `options.narrate` (below) can succeed at all.

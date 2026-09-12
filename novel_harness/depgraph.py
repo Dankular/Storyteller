@@ -111,6 +111,12 @@ def build_dependency_graph(state: ProjectState, chapters: List[Chapter]) -> Tupl
             edge_seen.add(key)
             edges.append(GraphEdge(source=source, target=target, kind=kind))
 
+    # A "frames" edge for a chapter narrated from within another (models.Chapter.frame_of) --
+    # target is another chapter node (already seeded above), not an entity.
+    for chapter in chapters:
+        if chapter.frame_of and chapter.frame_of in nodes_by_id:
+            _add_edge(chapter.id, chapter.frame_of, "frames")
+
     # Layer in authored `establishes` claims, in outline order -- can register a brand-new node
     # (an entity that doesn't exist in the bible yet at all) or pull an existing one's
     # established_at earlier if the claim predates what was already known.

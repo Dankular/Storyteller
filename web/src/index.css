@@ -75,14 +75,52 @@ button.danger { color: var(--danger); border-color: var(--danger); background: t
 .two-col { display: grid; grid-template-columns: 320px 1fr; gap: 2rem; max-width: 1200px; }
 @media (max-width: 800px) { .two-col { grid-template-columns: 1fr; } }
 
-.project-layout { display: flex; flex-direction: column; min-height: 100vh; }
-.project-nav {
-  display: flex; gap: 1rem; padding: 0.75rem 1.5rem;
-  border-bottom: 1px solid var(--border); background: var(--bg-alt);
+/* Workspace: the manuscript is the primary surface. Header (project + drawer toggles), then a
+   three-column body -- chapter rail (always visible) | manuscript (flexes) | drawer (only when
+   a toggle is active). See Workspace.tsx. */
+.workspace { display: flex; flex-direction: column; height: 100vh; }
+.workspace-header {
+  display: flex; align-items: center; gap: 1rem; padding: 0.75rem 1.25rem;
+  border-bottom: 1px solid var(--border); background: var(--bg-alt); flex-shrink: 0;
 }
-.project-nav a { text-decoration: none; color: var(--text-dim); padding: 0.25rem 0; }
-.project-nav a.active { color: var(--text); border-bottom: 2px solid var(--accent); }
-.project-content { flex: 1; }
+.workspace-header h1 { font-size: 1.1rem; margin: 0; flex: 1; }
+.library-link { color: var(--text-dim); text-decoration: none; font-size: 0.85rem; white-space: nowrap; }
+.drawer-toggles { display: flex; gap: 0.4rem; }
+.drawer-toggles button.active { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+
+.workspace-body { display: flex; flex: 1; min-height: 0; }
+
+.chapter-rail {
+  width: 220px; flex-shrink: 0; border-right: 1px solid var(--border); overflow-y: auto;
+  display: flex; flex-direction: column; padding: 0.5rem;
+}
+.chapter-rail a {
+  display: flex; align-items: center; gap: 0.4rem; padding: 0.5rem 0.4rem; border-radius: 6px;
+  text-decoration: none; color: var(--text); font-size: 0.85rem;
+}
+.chapter-rail a:hover { background: var(--bg-alt); }
+.chapter-rail a.selected { background: var(--bg-alt); box-shadow: inset 2px 0 0 var(--accent); }
+.chapter-rail .rail-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rail-add { margin-top: 0.5rem; }
+
+.workspace-main { flex: 1; overflow-y: auto; padding: 1.25rem 1.5rem 6rem; min-width: 0; }
+.workspace-main h2:first-child { margin-top: 0; }
+
+.empty-state { text-align: center; padding: 4rem 1rem; color: var(--text-dim); }
+
+.beats-details { margin: 1rem 0; border: 1px solid var(--border); border-radius: 8px; padding: 0.75rem; }
+.beats-details summary { cursor: pointer; font-weight: 600; }
+
+.drawer {
+  width: 380px; flex-shrink: 0; border-left: 1px solid var(--border); overflow-y: auto;
+  background: var(--bg-alt);
+}
+.drawer .page { max-width: none; padding: 1rem; }
+.drawer .two-col { grid-template-columns: 1fr; gap: 1rem; } /* the drawer is always narrow, regardless of viewport width -- Characters.tsx's 2-col list+detail layout stacks unconditionally here */
+@media (max-width: 900px) {
+  .chapter-rail { width: 160px; }
+  .drawer { position: fixed; inset: 0 0 0 auto; width: min(380px, 90vw); z-index: 30; }
+}
 
 .premise { color: var(--text-dim); font-style: italic; }
 .summary { white-space: pre-wrap; background: var(--bg-alt); padding: 1rem; border-radius: 8px; }
@@ -111,6 +149,11 @@ button.danger { color: var(--danger); border-color: var(--danger); background: t
 .entity-list li:hover { background: var(--bg-alt); }
 .entity-list li.selected { border-color: var(--accent); background: var(--bg-alt); }
 .entity-list p { margin: 0.15rem 0 0; color: var(--text-dim); font-size: 0.85rem; }
+
+.motif-list { list-style: none; padding: 0; }
+.motif-list li { display: flex; align-items: center; gap: 0.5rem; padding: 0.4rem 0; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.motif-list li button { margin-left: auto; }
+.motif-notes { color: var(--text-dim); font-size: 0.9rem; }
 
 .chapter-list { list-style: none; padding: 0; }
 .chapter-list li a {

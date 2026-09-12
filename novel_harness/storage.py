@@ -17,7 +17,7 @@ import re
 from dataclasses import asdict
 from typing import List
 
-from .models import ProjectState, Chapter, ContinuityFlag, Character, Location, PlotThread, Promise, beat_establishes, beat_text
+from .models import ProjectState, Chapter, ContinuityFlag, Character, Location, Memory, Motif, PlotThread, Promise, beat_establishes, beat_text
 
 
 def _register_planned_entities(state: ProjectState, chapter: Chapter) -> None:
@@ -186,6 +186,55 @@ class Project:
         promise.paid_in = chapter_id
         self.save_state(state)
         return promise
+
+    def remove_motif(self, motif_id: str) -> Motif:
+        state = self.load_state()
+        if motif_id not in state.motifs:
+            raise KeyError(f"No such motif: {motif_id!r}. Existing: {', '.join(state.motifs) or '(none)'}")
+        removed = state.motifs.pop(motif_id)
+        self.save_state(state)
+        return removed
+
+    def rename_motif(self, old: str, new: str) -> Motif:
+        state = self.load_state()
+        if old not in state.motifs:
+            raise KeyError(f"No such motif: {old!r}. Existing: {', '.join(state.motifs) or '(none)'}")
+        if new in state.motifs:
+            raise ValueError(f"A motif with id {new!r} already exists.")
+        motif = state.motifs.pop(old)
+        motif.id = new
+        state.motifs[new] = motif
+        self.save_state(state)
+        return motif
+
+    def remove_memory(self, memory_id: str) -> Memory:
+        state = self.load_state()
+        if memory_id not in state.memories:
+            raise KeyError(f"No such memory: {memory_id!r}. Existing: {', '.join(state.memories) or '(none)'}")
+        removed = state.memories.pop(memory_id)
+        self.save_state(state)
+        return removed
+
+    def rename_memory(self, old: str, new: str) -> Memory:
+        state = self.load_state()
+        if old not in state.memories:
+            raise KeyError(f"No such memory: {old!r}. Existing: {', '.join(state.memories) or '(none)'}")
+        if new in state.memories:
+            raise ValueError(f"A memory with id {new!r} already exists.")
+        memory = state.memories.pop(old)
+        memory.id = new
+        state.memories[new] = memory
+        self.save_state(state)
+        return memory
+
+    def resolve_memory(self, memory_id: str) -> Memory:
+        state = self.load_state()
+        if memory_id not in state.memories:
+            raise KeyError(f"No such memory: {memory_id!r}. Existing: {', '.join(state.memories) or '(none)'}")
+        memory = state.memories[memory_id]
+        memory.status = "resolved"
+        self.save_state(state)
+        return memory
 
     # ---- outline ----
     def load_outline(self) -> List[Chapter]:

@@ -73,6 +73,74 @@ def _build_pov_voice_block(state: ProjectState, chapter: Chapter) -> str:
     )
 
 
+def _build_motifs_block(state: ProjectState, chapters: List[Chapter], chapter: Chapter) -> str:
+    """Motifs (Motif -- see models.py) stay pinned into every chapter's context from the moment
+    they exist, unlike promises (which are filtered by relevance/due-date): the craft they encode
+    only works through repetition, so the model needs the reminder every time, not just when the
+    beats happen to mention the phrase already. Excludes only a motif explicitly tied to a LATER
+    chapter than this one (first_used_in set to something still ahead in the outline)."""
+    if not state.motifs:
+        return ""
+    idx_by_id = {c.id: i for i, c in enumerate(chapters)}
+    current_idx = idx_by_id.get(chapter.id, len(chapters))
+    active = [
+        m for m in state.motifs.values()
+        if not m.first_used_in or idx_by_id.get(m.first_used_in, 0) <= current_idx
+    ]
+    if not active:
+        return ""
+    lines = [f"- \"{m.phrase}\"" + (f" -- {m.notes}" if m.notes else "") for m in active]
+    return (
+        "Recurring motifs -- bring one back if a moment naturally calls for it, each recurrence "
+        "should land with more weight than the last, not identically:\n" + "\n".join(lines)
+    )
+
+
+def _build_memories_block(state: ProjectState, chapter: Chapter, beats_text: str) -> str:
+    """The Telltale-games mechanic (Memory -- see models.py): a specific past incident that keeps
+    shaping how one character treats another. Unlike motifs (always pinned), memories are filtered
+    by relevance like promises are -- only pinned when `subject` is this chapter's POV or is
+    mentioned in the beats, since a large cast can accumulate many memories and most won't matter
+    to any given chapter. Resolved memories (a grudge forgiven, trust repaired) are excluded."""
+    active = [m for m in state.memories.values() if m.status == "active"]
+    if not active:
+        return ""
+    relevant = [m for m in active if m.subject == chapter.pov or _mentioned([m.subject], beats_text)]
+    if not relevant:
+        return ""
+    lines = [
+        f"- {m.subject}, re: {m.about or '(general)'} -- {m.event}. Effect: {m.effect}"
+        for m in relevant
+    ]
+    return (
+        "Specific past incidents that should keep shaping behavior -- not just facts, an active "
+        "steer on how this character acts toward who's named, given what actually happened:\n"
+        + "\n".join(lines)
+    )
+
+
+def _build_frame_block(project: Project, state: ProjectState, chapter: Chapter) -> str:
+    """When chapter.frame_of names another chapter (see models.Chapter.frame_of), pull in that
+    frame chapter's POV/voice and a short excerpt -- the embedded chapter is being told FROM
+    within that frame (an old man remembering, a journalist transcribing), so the drafting model
+    needs to know whose voice is doing the framing, not just what happens in the embedded scene."""
+    if not chapter.frame_of:
+        return ""
+    frame = next((c for c in project.load_outline() if c.id == chapter.frame_of), None)
+    if not frame:
+        return ""
+    frame_text = project.load_chapter_text(frame.id)
+    excerpt = f"\nExcerpt from the frame chapter, for voice: {frame_text[:800]}" if frame_text else ""
+    voice = state.characters.get(frame.pov)
+    voice_line = f" Voice: {voice.voice_notes}" if voice and voice.voice_notes else ""
+    return (
+        f"This chapter is narrated FROM WITHIN the frame of \"{frame.title}\" ({frame.id}, "
+        f"POV: {frame.pov or 'unspecified'}).{voice_line} Write the embedded scene consistent "
+        f"with being recalled/recounted from that vantage, not as an independent present-tense "
+        f"scene unless the frame itself is present-tense.{excerpt}"
+    )
+
+
 def _build_promises_block(state: ProjectState, chapter: Chapter, beats_text: str) -> str:
     open_promises = [p for p in state.promises.values() if p.status in ("planted", "reinforced")]
     if not open_promises:
@@ -123,6 +191,9 @@ def build_chapter_context(project: Project, state: ProjectState, chapters: List[
     structural_beat_block = _build_structural_beat_block(state, chapters, chapter)
     pov_voice_block = _build_pov_voice_block(state, chapter)
     promises_block = _build_promises_block(state, chapter, beats_text)
+    motifs_block = _build_motifs_block(state, chapters, chapter)
+    memories_block = _build_memories_block(state, chapter, beats_text)
+    frame_block = _build_frame_block(project, state, chapter)
 
     extra_sections = ""
     if structural_beat_block:
@@ -131,6 +202,12 @@ def build_chapter_context(project: Project, state: ProjectState, chapters: List[
         extra_sections += f"\n## POV voice\n{pov_voice_block}\n"
     if promises_block:
         extra_sections += f"\n## Open promises\n{promises_block}\n"
+    if motifs_block:
+        extra_sections += f"\n## Recurring motifs\n{motifs_block}\n"
+    if memories_block:
+        extra_sections += f"\n## Remembered incidents (affects how characters treat each other)\n{memories_block}\n"
+    if frame_block:
+        extra_sections += f"\n## Frame narrative\n{frame_block}\n"
 
     tags_block = f"\n## Focus / themes to keep alive throughout\n{', '.join(state.tags)}\n" if state.tags else ""
     genre_block = f"\n## Genre\n{state.genre_id}\n" if state.genre_id else ""
@@ -159,6 +236,9 @@ def build_chapter_context(project: Project, state: ProjectState, chapters: List[
 ## This chapter to write: {chapter.title} (POV: {chapter.pov or "unspecified"})
 Target length: ~{chapter.word_target} words.
 
-Beats to hit, in order (expand each into full scenes -- do not just summarize them):
+Beats to hit, in order. Vary pacing deliberately: dilate the beats that carry emotional weight
+into full scenes with room to breathe, and it's fine to compress a purely transitional beat into a
+sentence or two of summary on purpose -- that's a legitimate pacing choice, not a shortcut, as long
+as it's a genuine choice and not every beat getting the thin treatment:
 {beats_text}
 """

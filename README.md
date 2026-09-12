@@ -10,12 +10,14 @@ A project is a directory on disk with:
 
 - `state.json` — the **story bible**: characters (with a *current status* and an optional
   *voice profile* for POV consistency), locations, plot threads (open/resolved), a
-  **promises ledger** (setups/Chekhov's guns, tracked until they pay off), a **genre
-  profile** (a cloned, editable structural beat-sheet + tropes + a chapter-ending rule),
-  a style guide, and a running summary kept under a word-count cap by an LLM compression
-  pass.
+  **promises ledger** (setups/Chekhov's guns, tracked until they pay off), **motifs**
+  (recurring phrases/images meant to resurface with escalating weight — distinct from a
+  promise, which resolves once), a **genre profile** (a cloned, editable structural
+  beat-sheet + tropes + a chapter-ending rule), a style guide, and a running summary kept
+  under a word-count cap by an LLM compression pass.
 - `outline.json` — chapters as an ordered list of **beats** (plot points to hit), not
-  prose, each optionally tagged with which genre beat it serves. You write (or
+  prose, each optionally tagged with which genre beat it serves and, optionally, which
+  other chapter it's narrated from within (a **frame narrative**). You write (or
   outline-plan proposes, for review) the outline; the model writes the scenes.
 - `outline_proposal.json` — a not-yet-committed outline proposal from `outline-plan`,
   meant to be reviewed/edited before `outline-commit-proposal` merges it in.
@@ -116,6 +118,47 @@ or declares it wrong, just falls back to substring inference exactly as before (
 silently drops anything that doesn't parse as `kind:id`) — the deterministic check itself is what
 you can actually rely on, same as the promise-staleness audit above.
 
+### Recurring motifs
+
+A `motif` (`bible-add-motif <id> <phrase> [--notes ...]`) is a recurring phrase or image meant to
+gain weight each time it resurfaces — the "Still us?" / "Always" refrain craft technique, where a
+short repeated line carries escalating stakes on each return. Distinct from a `promise`, which is a
+setup awaiting one specific payoff and eventually resolves: a motif isn't resolved, it's
+*reinforced*, so unlike promises (filtered by beat relevance/due-date) every motif stays pinned into
+every chapter's context (`context.py`'s `_build_motifs_block`) from the moment it exists, with an
+explicit instruction that each recurrence should land with more weight than the last, not
+identically. `first_used_in` is optional and purely informational (set it by hand, or leave it
+blank for a motif planted before any chapter is drafted).
+
+### Frame narratives
+
+A chapter can be tagged `--frame-of <chapter_id>` (`outline-add`, or `update_chapter`'s `frame_of`
+field) to mark it as narrated from within another chapter — an old man remembering, a journalist
+transcribing an interview, the Barnaby/Desperado structural pattern. When set, `context.py` pulls
+in the frame chapter's POV, voice profile, and a short excerpt, and instructs the drafting model to
+render the embedded scene consistent with being recalled/recounted from that vantage rather than as
+an independent present-tense scene. `graph-show`/the dependency graph show this as a `frames` edge
+(chapter → the chapter it's framed by) for visibility; it's purely a context-assembly and display
+hint, not a rendering system — nothing else about how chapters/beats/generation work changes.
+
+### Relationship memories ("X will remember that")
+
+A `memory` (`bible-add-memory <id> <subject> <about> <event> <effect> [--chapter ...]`) is the
+Telltale-games mechanic — a specific past incident that keeps shaping how one character treats
+another, distinct from both a `promise` (a setup that resolves once, to the reader) and a
+character's `status` (their overall current situation, not a per-relationship consequence).
+`subject` is whose future behavior is affected, `about` is who/what it concerns (usually another
+character), `event` is what happened, and `effect` is the behavioral instruction — not just a fact
+for the record, an active steer on how `subject` should act toward `about` going forward (a
+betrayal earns suspicion, a rescue earns loyalty, a lie caught earns distance). Like promises (and
+unlike motifs, which are always pinned), a memory is only pulled into a chapter's context when
+`subject` is that chapter's POV or is mentioned in the beats (`context.py`'s
+`_build_memories_block`) — a large cast can accumulate many memories, and most won't matter to any
+given chapter. Extraction (`extract_and_update_state`) can auto-propose one after any chapter where
+something happens that should genuinely change how a character treats another; `memory-resolve`
+(or the web UI's "Mark resolved") marks it settled (a grudge forgiven, trust repaired) without
+deleting the record, at which point it stops being pinned into context.
+
 ### POV / voice persistence
 
 Characters can carry a `voice_notes` field — diction, sentence rhythm, verbal tics, how
@@ -134,7 +177,12 @@ For each chapter, `generate_chapter()` runs:
    previous chapter's full text (for voice continuity), the current beats, the
    chapter's structural-beat/genre guidance, the POV character's voice profile, and any
    promises relevant to or coming due in this chapter.
-2. **Draft** — one model call, full prose, genre-conditioned when a genre is set.
+2. **Draft** — one model call, full prose, genre-conditioned when a genre is set. Prompted to vary
+   pacing deliberately (dilate emotionally important beats into full scenes, compress transitional
+   ones into brief summary on purpose rather than dramatizing everything alike), build anticipation
+   through reveal ordering (withhold a name, delay a direct answer) rather than just not resolving
+   tension early, and externalize emotion through a specific object/action instead of naming the
+   feeling outright — see `pipeline.PACING_AND_RESTRAINT_NOTE`.
 3. **Critique ↔ revise, iteratively** — a structural-only critique pass (pacing, whether
    the chapter's tension target/hook rule is honored, premature resolution) hands its
    findings to a harsher editorial revise pass (pacing, flat dialogue, telling-not-showing).
@@ -150,12 +198,14 @@ For each chapter, `generate_chapter()` runs:
    frequently rubber-stamps (90/100 audited reflection blocks flagged nothing in their study),
    and this project's default model is on the smaller end of what that paper tested. An
    occasional wasted critique call when it stops early is a cheap price either way.
-4. **Beat-coverage check** — a structured call that judges each beat as
-   covered/rushed/missing; missing beats are patched back in with a targeted rewrite by
-   default (or just flagged with `--no-patch-missing`), and the patch itself is then
-   re-checked against just the beats it was supposed to fix, rather than trusted blindly —
-   anything still missing/rushed after the patch attempt is flagged. Skippable entirely
-   with `--no-beat-check`.
+4. **Beat-coverage check** — a structured call that judges each beat as covered/rushed/missing.
+   A brief, purposeful summary of a transitional beat counts as "covered," same as a fully
+   dramatized scene — deliberate compression is good pacing craft, not a defect; "rushed" means
+   *thin in a way that reads as an oversight*, not merely short. Missing/genuinely-rushed beats are
+   patched back in with a targeted rewrite by default (or just flagged with `--no-patch-missing`),
+   and the patch itself is then re-checked against just the beats it was supposed to fix, rather
+   than trusted blindly — anything still missing/rushed after the patch attempt is flagged.
+   Skippable entirely with `--no-beat-check`.
 5. **POV consistency check** — flags head-hopping or voice drift against the POV
    character's voice profile. Skippable with `--no-pov-check`.
 6. **Continuity check** — compares the chapter against the bible for contradictions.
@@ -246,7 +296,8 @@ and running summary accumulate automatically.
 
 The bible isn't append-only: `bible-remove-character`/`bible-rename-character` (renaming also
 updates any chapter's `--pov` that used the old name), `bible-remove-location`/
-`bible-rename-location`, `thread-remove`/`thread-rename`, `promise-remove`/`promise-rename`, and
+`bible-rename-location`, `thread-remove`/`thread-rename`, `promise-remove`/`promise-rename`,
+`motif-remove`/`motif-rename`, `memory-remove`/`memory-rename`/`memory-resolve`, and
 `outline-remove <id> [--force]` (refuses to delete an already-drafted chapter's manuscript text
 unless forced) all exist for fixing a bible entry that turns out to be wrong or redundant.
 `continuity-resolve <index>` marks one flag from `continuity-show`'s output resolved (`<index>` is
@@ -282,8 +333,17 @@ npm install
 npm run dev   # proxies /api and /ws to the backend on :8000 -- see web/vite.config.ts
 ```
 
-Open the printed Vite URL, add a project by path (the directory must already have `state.json` --
-`init`/`new` it with the CLI first), and it opens in the library.
+Open the printed Vite URL. The library lets you create a brand-new novel (title + premise --
+`POST /api/projects/new`, the browser's equivalent of the CLI's `init`, since a deployed instance
+has no shell to run the CLI in first) or add an existing project by path.
+
+**The manuscript is the primary surface**, NovelAI-style -- opening a project lands you directly in
+a chapter's editor (the last one this browser had open, or the first in outline order, remembered
+per-project in `localStorage`), not a dashboard. A slim always-visible chapter rail on the left
+switches between chapters (and quick-adds a new one); everything else -- Characters, Story (premise/
+genre/tags/style/motifs/memories/summary), Plan, and Continuity -- opens as a drawer on the right
+via the header toggles, auxiliary to the manuscript rather than destinations you navigate away to.
+Only one drawer is open at a time, closed by default so the manuscript gets full width.
 
 Long-running operations (`generate`, `continue`, `plan`, `audit`) run as background jobs
 (`novel_harness/webapi/jobs.py`) so the browser doesn't block on a multi-minute chapter draft --

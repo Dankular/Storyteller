@@ -16,7 +16,7 @@ from typing import Callable, List, Optional
 
 from .llm import LLMClient
 from .storage import Project
-from .models import ProjectState, Chapter, ContinuityFlag, Character, Location, PlotThread, Promise, beat_text
+from .models import ProjectState, Chapter, ContinuityFlag, Character, Location, PlotThread, Promise, Memory, beat_text
 from .context import build_chapter_context, _resolve_structural_beat
 from .depgraph import check_dependencies
 from .genres import GenrePreset, match_preset, clone_preset_beats
@@ -78,13 +78,42 @@ explanation: when a reveal or emotional beat lands, trust it to land without fol
 explanatory paragraph spelling out what it means. A chapter that fully answers its own tension in the \
 same scene it was introduced has failed at pacing, regardless of how polished the prose is."""
 
-BEAT_COVERAGE_SYSTEM = """You audit whether a drafted chapter actually dramatizes every beat from its \
-outline, rather than skipping or merely summarizing one. For each beat given, decide: "covered" (rendered \
-as a full scene with detail), "rushed" (mentioned or summarized in passing, not dramatized), or "missing" \
-(not present at all). Return JSON:
+# Craft patterns consistently present in skilled human short fiction (deliberate pacing variation,
+# reveal ordering, emotion externalized rather than named) that LLM drafts tend to flatten toward a
+# uniform, fully-narrated, everything-stated default. Distinct from TENSION_DISCIPLINE_NOTE, which
+# is about not resolving tension early -- this is about the moment-to-moment technique of building
+# toward it and rendering it once it lands.
+PACING_AND_RESTRAINT_NOTE = """
+
+Vary pacing on purpose: dilate emotionally important moments into near-real-time scene work \
+(dialogue, physical sensation, beat-by-beat action), and compress transitional or connective \
+material into brief summary -- both are legitimate technique, not a quality shortcut, as long as \
+which one you reach for is a deliberate choice tied to what the moment needs, not a uniform \
+treatment applied to every beat alike. Build anticipation by controlling what's revealed and when: \
+a name withheld a beat longer than expected, a direct question deflected before it's answered, \
+backstory disclosed just before (not after) the reveal it explains -- these create curiosity \
+without requiring the POV character to be ignorant of anything they'd actually know. Externalize \
+emotion through a specific object, action, or physical detail rather than naming the feeling \
+outright (her hand keeps finding the ring in her pocket, not "she felt anxious"). Use sensory \
+detail sparingly and precisely -- one exact, well-chosen physical detail earns more than several \
+generic ones."""
+
+BEAT_COVERAGE_SYSTEM = """You audit whether a drafted chapter actually delivers every beat from its \
+outline -- but deliberate, well-executed compression is good pacing craft, not a defect, so judge \
+INTENT and EXECUTION, not just scene length. For each beat given, decide:
+- "covered": the beat's substance actually happened and is clearly legible to the reader, whether \
+that's a fully dramatized scene OR a brief, purposeful summary that reads as a pacing choice \
+(e.g. compressing a travel/waiting/transitional beat in a sentence or two while the chapter's \
+real scene-work goes to the beats that carry emotional weight).
+- "rushed": the beat is thin in a way that reads as an oversight, not a choice -- vague, unclear \
+whether it actually happened, or given noticeably less attention than its importance to the story warrants.
+- "missing": not present at all.
+Return JSON:
 {"beats": [{"beat": "<beat text, verbatim>", "status": "covered|rushed|missing", "evidence": "<a SHORT quote, 10 words or fewer, or empty>"}]}
-"evidence" must never exceed 10 words -- a pointer to where in the chapter, not a full excerpt. Judge \
-strictly: a beat that's only referenced in a single throwaway line is "rushed", not "covered"."""
+"evidence" must never exceed 10 words -- a pointer to where in the chapter, not a full excerpt. A \
+beat that's only referenced in a single throwaway line with no real weight given to it is still \
+"rushed" -- the distinction is deliberate compression (covered) versus something that just didn't \
+get its due (rushed), not sentence count."""
 
 PATCH_BEATS_SYSTEM = """You are a novelist revising a chapter draft that skipped some of its required \
 beats. You will be given the chapter and a list of beats that were missing or only rushed through. \
@@ -152,10 +181,15 @@ bible. Given the chapter text and the existing story bible, return JSON with thi
   "threads_resolved": ["<existing thread id from the bible that this chapter resolves>"],
   "new_promises": [{"id": "<short-slug>", "description": "<a specific setup/promise made to the reader -- a planted detail, a foreshadowed threat, an unanswered question -- that will need to pay off later>", "due_by": "<optional: a chapter id or story-beat name if implied, else empty>"}],
   "promises_paid": ["<existing promise id from the bible that this chapter pays off>"],
+  "new_memories": [{"id": "<short-slug>", "subject": "<character whose FUTURE behavior is affected>", "about": "<who/what it concerns -- usually another character's name, else empty>", "event": "<what happened, briefly>", "effect": "<how subject should act differently toward `about` in later chapters as a direct result -- a behavioral instruction, not just a fact>"}],
+  "memories_resolved": ["<existing memory id from the bible that this chapter shows being forgiven/repaired/superseded>"],
   "chapter_summary": "<2-4 sentence summary of what happened, for the running summary>"
 }
 Only include entries that are actually supported by the chapter text. Only flag a new_promise if it's a \
-genuine planted setup a reader would expect to matter later -- not every detail is a promise."""
+genuine planted setup a reader would expect to matter later -- not every detail is a promise. Only flag \
+a new_memory for something that should genuinely change how one character treats another going \
+forward (a betrayal, a rescue, a lie caught, a kindness) -- not every interaction leaves this kind of \
+mark, and a character's ordinary personality or a one-off mood is a character_update, not a memory."""
 
 SUMMARY_COMPRESS_SYSTEM = """Condense this running story summary into a tighter version, \
 preserving all plot-critical facts, character developments, and open threads, but cutting \
@@ -278,25 +312,25 @@ guarded?). Base it on the character description and any excerpts given. Output o
 sentences, no headers or commentary."""
 
 
-CONTINUE_SYSTEM = """You are a skilled novelist continuing a chapter of a novel already in \
+CONTINUE_SYSTEM = ("""You are a skilled novelist continuing a chapter of a novel already in \
 progress, with the author actively steering it. You'll be given the chapter's beats, story bible \
 context, and everything written in this chapter SO FAR -- including the author's own edits, which \
 are settled canon, not a draft to second-guess. Write the NEXT segment of prose, picking up \
 immediately from where the existing text leaves off. Do not repeat, summarize, or restate anything \
 already written, and do not wrap up or conclude the chapter unless the beats and what's already \
 written make that the obvious next beat. Match the established voice exactly. Output only the new \
-continuation text, nothing else."""
+continuation text, nothing else.""" + TENSION_DISCIPLINE_NOTE + PACING_AND_RESTRAINT_NOTE)
 
 
 def build_draft_system(state: ProjectState) -> str:
-    system = DRAFT_SYSTEM_BASE + TENSION_DISCIPLINE_NOTE
+    system = DRAFT_SYSTEM_BASE + TENSION_DISCIPLINE_NOTE + PACING_AND_RESTRAINT_NOTE
     if state.genre_beats:
         system += GENRE_AWARENESS_NOTE
     return system
 
 
 def build_revise_system(state: ProjectState) -> str:
-    system = REVISE_SYSTEM_BASE + TENSION_DISCIPLINE_NOTE
+    system = REVISE_SYSTEM_BASE + TENSION_DISCIPLINE_NOTE + PACING_AND_RESTRAINT_NOTE
     if state.genre_beats:
         system += GENRE_AWARENESS_NOTE
     return system
@@ -511,6 +545,10 @@ def extract_and_update_state(
         "locations": list(state.locations.keys()),
         "open_threads": {t.id: t.description for t in state.plot_threads.values() if t.status == "open"},
         "open_promises": {p.id: p.description for p in state.promises.values() if p.status in ("planted", "reinforced")},
+        "active_memories": {
+            m.id: f"{m.subject} re: {m.about} -- {m.event}"
+            for m in state.memories.values() if m.status == "active"
+        },
     }
     result = client.call_json(EXTRACT_SYSTEM, f"Bible:\n{bible_json}\n\nChapter:\n{chapter_text}")
 
@@ -550,6 +588,23 @@ def extract_and_update_state(
             state.promises[pid].status = "paid"
             state.promises[pid].paid_in = chapter_id
 
+    for m in result.get("new_memories", []):
+        mid = m.get("id")
+        if mid and mid not in state.memories:
+            state.memories[mid] = Memory(
+                id=mid,
+                subject=m.get("subject", ""),
+                about=m.get("about", ""),
+                event=m.get("event", ""),
+                effect=m.get("effect", ""),
+                chapter_id=chapter_id,
+                origin="auto",
+            )
+
+    for mid in result.get("memories_resolved", []):
+        if mid in state.memories:
+            state.memories[mid].status = "resolved"
+
     summary_addition = result.get("chapter_summary", "")
     if summary_addition:
         state.running_summary = (state.running_summary + "\n" + summary_addition).strip()
@@ -557,7 +612,8 @@ def extract_and_update_state(
     if progress:
         progress(
             f"Extraction done: {len(result.get('new_promises', []))} new promise(s), "
-            f"{len(result.get('promises_paid', []))} paid off."
+            f"{len(result.get('promises_paid', []))} paid off, "
+            f"{len(result.get('new_memories', []))} new memory(ies)."
         )
     return state
 

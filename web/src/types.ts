@@ -35,6 +35,25 @@ export interface Promise {
   paid_in: string | null
 }
 
+export interface Motif {
+  id: string
+  phrase: string
+  notes: string
+  first_used_in: string | null
+}
+
+// The Telltale-games mechanic ("X will remember that") -- see models.py's Memory docstring.
+export interface Memory {
+  id: string
+  subject: string // whose future behavior is affected
+  about: string // who/what it concerns, usually another character
+  event: string
+  effect: string // how subject should act differently toward about going forward
+  chapter_id: string | null
+  status: string // active | resolved
+  origin: string // manual | auto
+}
+
 // A beat is either a plain string, or an object declaring authored dependencies -- see
 // models.py's Chapter.beats docstring.
 export type StructuredBeat = { text: string; requires?: string[]; establishes?: string[] }
@@ -59,6 +78,7 @@ export interface Chapter {
   status: string // planned | drafted | revised | final
   file: string | null
   structural_beat: string | null
+  frame_of: string | null // another chapter id this one is narrated from within, e.g. a flashback framed by a present-day chapter
 }
 
 export interface ContinuityFlag {
@@ -78,6 +98,8 @@ export interface ProjectState {
   locations: Record<string, Location>
   plot_threads: Record<string, PlotThread>
   promises: Record<string, Promise>
+  motifs: Record<string, Motif>
+  memories: Record<string, Memory>
   genre_id: string | null
   genre_beats: unknown[]
   tropes_embrace: string[]
