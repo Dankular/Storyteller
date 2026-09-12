@@ -318,23 +318,33 @@ def draft_chapter(
 
 def continue_chapter(
     client: LLMClient, project: Project, state: ProjectState, chapters: List[Chapter], chapter: Chapter,
-    existing_text: str, progress: Optional[Progress] = None,
+    existing_text: str, progress: Optional[Progress] = None, on_chunk: Optional[Progress] = None,
 ) -> str:
     """One model call, returning only the NEW segment to append -- not a rewrite. Reuses
     build_chapter_context() entirely (bible/promises/structural-beat/voice guidance) rather than
     forking it; the appended "written so far" section plus CONTINUE_SYSTEM's own instructions are
     what make this a continuation instead of a fresh draft, so the context-assembly logic itself
-    never has to know which mode it's serving."""
+    never has to know which mode it's serving.
+
+    `on_chunk`, if given, receives each raw streamed piece of the continuation text the instant it
+    arrives -- unthrottled, unlike `progress` (which `_token_reporter` deliberately batches into
+    periodic summary lines). This is the seam real character-by-character UI streaming plugs into
+    (see webapi/jobs.py) -- a caller that doesn't need that (the CLI, an agent) just omits it."""
     if progress:
         progress(f"Continuing '{chapter.title}'...")
     context = build_chapter_context(project, state, chapters, chapter)
     written_block = existing_text.strip() or "(nothing yet -- this is the opening of the chapter)"
     brief = context + f"\n\n## Written so far in this chapter (continue from here -- do not repeat it)\n{written_block}"
     remaining_chars = max(0, chapter.word_target * 5.5 - len(existing_text))
-    text = client.call(
-        CONTINUE_SYSTEM, brief, max_tokens=4096,
-        on_token=_token_reporter(progress, "Continue", expected_chars=remaining_chars or None),
-    )
+    reporter = _token_reporter(progress, "Continue", expected_chars=remaining_chars or None)
+
+    def on_token(piece: str) -> None:
+        if reporter:
+            reporter(piece)
+        if on_chunk:
+            on_chunk(piece)
+
+    text = client.call(CONTINUE_SYSTEM, brief, max_tokens=4096, on_token=on_token)
     if progress:
         progress(f"Continuation done: {len(text.split())} words.")
     return text
@@ -1015,7 +1025,7 @@ def generate_chapter(
 
 def continue_and_extract(
     client: LLMClient, project: Project, chapter_id: str,
-    edited_text: Optional[str] = None, progress: Optional[Progress] = None,
+    edited_text: Optional[str] = None, progress: Optional[Progress] = None, on_chunk: Optional[Progress] = None,
 ) -> dict:
     """The NovelAI-style "Send" button: appends one continuation segment to a chapter instead of
     drafting/rewriting the whole thing, and keeps the bible in sync as it goes -- a lighter,
@@ -1039,7 +1049,7 @@ def continue_and_extract(
     else:
         existing_text = project.load_chapter_text(chapter_id)
 
-    new_text = continue_chapter(client, project, state, chapters, chapter, existing_text, progress=progress)
+    new_text = continue_chapter(client, project, state, chapters, chapter, existing_text, progress=progress, on_chunk=on_chunk)
     full_text = f"{existing_text.rstrip()}\n\n{new_text.strip()}" if existing_text.strip() else new_text.strip()
     project.save_chapter_text(chapter_id, full_text)
 

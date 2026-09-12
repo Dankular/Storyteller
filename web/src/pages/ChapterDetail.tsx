@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { getChapterText, getSnapshot, removeEntity, startContinue, startGenerate, updateChapter } from '../api'
 import { useJobsContext } from '../JobsContext'
@@ -47,6 +47,16 @@ export function ChapterDetail() {
   const [sendJobId, setSendJobId] = useState<string | null>(null)
   const [characterNote, setCharacterNote] = useState<string | null>(null)
   const sendJob = useJob(sendJobId)
+  const isSending = sendJob.status === 'running' || sendJob.status === 'queued'
+  const editorRef = useRef<HTMLTextAreaElement>(null)
+
+  // Auto-scroll to the bottom as streamed text grows, so the live-typing effect stays visible
+  // instead of scrolling off the bottom of a tall chapter.
+  useEffect(() => {
+    if (isSending && editorRef.current) {
+      editorRef.current.scrollTop = editorRef.current.scrollHeight
+    }
+  }, [isSending, sendJob.streamedText])
 
   const load = async () => {
     if (!projectId || !chapterId) return
@@ -212,24 +222,22 @@ export function ChapterDetail() {
         rewrite" above.
       </p>
       <textarea
-        className="manuscript-editor"
-        value={text}
+        className={`manuscript-editor${isSending ? ' streaming' : ''}`}
+        value={isSending ? text + (text.trim() ? '\n\n' : '') + sendJob.streamedText : text}
         onChange={(e) => setText(e.target.value)}
+        readOnly={isSending}
         placeholder="Not drafted yet -- press Send to write the opening."
         rows={18}
+        ref={editorRef}
       />
       <div className="send-row">
-        <button
-          className="primary send-button"
-          onClick={send}
-          disabled={sendJob.status === 'running' || sendJob.status === 'queued'}
-        >
-          {sendJob.status === 'running' || sendJob.status === 'queued' ? 'Writing…' : 'Send'}
-          {sendJob.status !== 'running' && sendJob.status !== 'queued' && <span>▶</span>}
+        <button className="primary send-button" onClick={send} disabled={isSending}>
+          {isSending ? 'Writing…' : 'Send'}
+          {!isSending && <span>▶</span>}
         </button>
         {characterNote && <span className="character-note">Bible updated: {characterNote}</span>}
       </div>
-      {(sendJob.status === 'running' || sendJob.status === 'queued') && (
+      {isSending && (
         <p className="hint">{sendJob.progress[sendJob.progress.length - 1] ?? 'Starting…'}</p>
       )}
       {sendJob.status === 'failed' && <p className="error">{sendJob.error}</p>}

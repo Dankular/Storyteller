@@ -303,6 +303,14 @@ chapter," `generate_chapter()`'s complete critique/revise/all-checks pipeline, u
 which replaces the whole text). Same split is available to agents: `generate` vs. the lighter
 `continue_chapter` action in `agent_wrapper.py`.
 
+Send's text streams into the editor live, character by character, as the model writes it --
+`pipeline.continue_chapter`'s new `on_chunk` callback (a second, unthrottled sibling to the
+existing `progress` callback) is wired all the way through the job engine as its own WebSocket
+message type (`{"type":"chunk",...}`, `webapi/jobs.py`/`ws.py`) so the browser doesn't just see a
+"still working" indicator for several seconds and then the whole result at once. `generate`/"Full
+rewrite" deliberately doesn't stream its draft this way -- that intermediate text gets rewritten by
+the revise pass, so showing it live would show the user text they won't end up with.
+
 For production, `npm run build` in `web/` produces `web/dist/`, which `novel_harness.webapi.app`
 serves automatically (as static files) if present -- one process, no separate frontend server
 needed. This is a human-facing surface, not part of the agent contract in `AGENTS.md`; agents keep
@@ -335,6 +343,12 @@ the dependency graph is shown as a list, not an interactive diagram, in this fir
 - **`outline-plan` is assisted, not automatic.** It writes a proposal file for you to
   review/edit; nothing is committed to `outline.json` until you run
   `outline-commit-proposal`.
+- **Committing a proposal stub-registers any character/location/thread/promise it names that
+  doesn't exist in the bible yet** -- a POV character invented because none existed, or a beat's
+  authored `establishes: ["character:X"]` -- so it's immediately visible and editable (Characters
+  page, `bible-show`) before any chapter is ever drafted, not just once a chapter that happens to
+  mention it gets drafted and extraction reactively notices it. Generalizes the same idea
+  `book-plan`'s `plants` already used for pre-registering promises (`storage._register_planned_entities`).
 - **Costs**: a full `generate` call's baseline is draft, critique, revise, beat-coverage
   check, POV check, continuity check, tension check, and extraction — 8 model calls before
   anything conditional. The critique↔revise loop can add another critique+revise pair per

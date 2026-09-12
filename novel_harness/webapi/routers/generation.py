@@ -20,7 +20,10 @@ def generate_chapter(project_id: str, chapter_id: str, payload: dict | None = Bo
     critique/critique_rounds/check/beat_check/patch_missing/pov_check/tension_check/narrate)."""
     options = (payload or {}).get("options")
 
-    def work(progress):
+    def work(progress, on_chunk):
+        # generate_chapter's own streamed stages (draft/revise) go through the throttled
+        # `progress` summaries only, same as before -- see /continue below for the one endpoint
+        # that actually wires up on_chunk, and its docstring for why generate doesn't too.
         session = get_session(project_id, progress=progress)
         return session.generate(chapter_id, options)
 
@@ -33,12 +36,18 @@ def continue_chapter(project_id: str, chapter_id: str, payload: dict | None = Bo
     """{"edited_text": "..."} -- the "Send" button: saves edited_text as the chapter's current
     text (capturing whatever the editor's textarea holds, including the user's own
     selection/delete/reword edits), appends one continuation segment, and updates the bible from
-    the result. Cheap enough (2 model calls) to click repeatedly, unlike /generate's full pipeline."""
+    the result. Cheap enough (2 model calls) to click repeatedly, unlike /generate's full pipeline.
+
+    Unlike every other job here, this one's `on_chunk` is actually wired up: the appended segment
+    IS the final text (no subsequent revise/critique pass can still rewrite it away), so streaming
+    it live to the editor is never misleading -- generate_chapter's intermediate draft stream, by
+    contrast, gets rewritten by the revise pass, so showing it live would show text the user won't
+    actually end up with."""
     edited_text = (payload or {}).get("edited_text")
 
-    def work(progress):
+    def work(progress, on_chunk):
         session = get_session(project_id, progress=progress)
-        return session.continue_chapter(chapter_id, edited_text)
+        return session.continue_chapter(chapter_id, edited_text, on_chunk=on_chunk)
 
     job = job_manager.create("continue", project_id, work)
     return {"job_id": job.id}
@@ -51,9 +60,10 @@ def plan(project_id: str, payload: dict | None = Body(default=None)):
     count = int(payload.get("count", 3))
     whole_book = bool(payload.get("whole_book", False))
 
-    def work(progress):
-        # plan_outline/plan_book don't take a progress callback (each is one model call) --
-        # `progress` is accepted here for a uniform `work` signature but unused.
+    def work(progress, on_chunk):
+        # plan_outline/plan_book don't take a progress/on_chunk callback (each is one model call
+        # with no intermediate content worth streaming) -- both params are accepted here only for
+        # the uniform `work` signature JobManager.create expects, and otherwise unused.
         session = get_session(project_id)
         return session.plan(count, whole_book)
 
@@ -91,7 +101,7 @@ def commit(project_id: str, payload: dict | None = Body(default=None)):
 
 @router.post("/audit")
 def audit(project_id: str):
-    def work(progress):
+    def work(progress, on_chunk):
         session = get_session(project_id, progress=progress)
         return session.audit()
 

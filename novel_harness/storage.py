@@ -17,7 +17,40 @@ import re
 from dataclasses import asdict
 from typing import List
 
-from .models import ProjectState, Chapter, ContinuityFlag, Character, Location, PlotThread, Promise
+from .models import ProjectState, Chapter, ContinuityFlag, Character, Location, PlotThread, Promise, beat_establishes, beat_text
+
+
+def _register_planned_entities(state: ProjectState, chapter: Chapter) -> None:
+    """When a committed outline/book-plan chapter names a POV character, or one of its beats
+    authors an `establishes` ref (see models.py's Chapter.beats docstring) for an entity that
+    doesn't exist in the bible yet, create a stub entry for it now -- at commit time, before any
+    chapter is ever drafted -- instead of leaving it to only materialize reactively once a chapter
+    that happens to mention it gets drafted and fact-extraction notices it. Without this, a
+    freshly-planned outline can name a POV character or reference `establishes: ["character:X"]`
+    that never appears anywhere in `state.characters`, so the Characters page has nothing to show
+    or edit even though the outline already depends on it existing -- exactly the class of gap
+    `commit_book_plan_proposal`'s `plants` -> Promise pre-registration already solved for promises;
+    this generalizes that same idea to every entity kind an authored `establishes` tag can name.
+    Never overwrites an entity that already exists (a plant's own promise pre-registration, run
+    before this, always wins over the stub this would otherwise create for the same id)."""
+    if chapter.pov and chapter.pov not in state.characters:
+        state.characters[chapter.pov] = Character(name=chapter.pov, introduced_in=chapter.id)
+
+    for beat in chapter.beats:
+        for ref in beat_establishes(beat):
+            if ":" not in ref:
+                continue
+            kind, raw_id = ref.split(":", 1)
+            if not raw_id:
+                continue
+            if kind == "character" and raw_id not in state.characters:
+                state.characters[raw_id] = Character(name=raw_id, introduced_in=chapter.id)
+            elif kind == "location" and raw_id not in state.locations:
+                state.locations[raw_id] = Location(name=raw_id, introduced_in=chapter.id)
+            elif kind == "plot_thread" and raw_id not in state.plot_threads:
+                state.plot_threads[raw_id] = PlotThread(id=raw_id, description=beat_text(beat), opened_in=chapter.id)
+            elif kind == "promise" and raw_id not in state.promises:
+                state.promises[raw_id] = Promise(id=raw_id, description=beat_text(beat), planted_in=chapter.id, origin="planned")
 
 
 class Project:
@@ -217,9 +250,12 @@ class Project:
             json.dump(proposal, f, indent=2)
 
     def commit_outline_proposal(self) -> List[Chapter]:
-        """Append the reviewed proposal onto outline.json, skipping any id that already exists."""
+        """Append the reviewed proposal onto outline.json, skipping any id that already exists.
+        Also stub-registers any POV character or authored `establishes` ref the new chapters name
+        that isn't in the bible yet -- see _register_planned_entities."""
         proposal = self.load_outline_proposal()
         chapters = self.load_outline()
+        state = self.load_state()
         existing_ids = {c.id for c in chapters}
         added = []
         for p in proposal:
@@ -235,7 +271,9 @@ class Project:
             )
             chapters.append(chapter)
             added.append(chapter)
+            _register_planned_entities(state, chapter)
         self.save_outline(chapters)
+        self.save_state(state)
         os.remove(self.outline_proposal_path)
         return added
 
@@ -255,7 +293,10 @@ class Project:
         already exists. Each chapter's `plants` are folded into its beats (so the drafting model
         actually writes them) AND pre-registered as Promise entries with due_by=payoff_chapter
         (origin="planned") -- so the promise ledger knows about a payoff obligation before that
-        chapter is ever drafted, not just after extraction reactively detects it."""
+        chapter is ever drafted, not just after extraction reactively detects it. Also
+        stub-registers any POV character or authored `establishes` ref (characters/locations/
+        threads/promises not already covered by a plant) the new chapters name -- see
+        _register_planned_entities."""
         proposal = self.load_book_plan_proposal()
         chapters = self.load_outline()
         state = self.load_state()
@@ -292,6 +333,7 @@ class Project:
             chapters.append(chapter)
             existing_ids.add(cid)
             added.append(chapter)
+            _register_planned_entities(state, chapter)
         self.save_outline(chapters)
         self.save_state(state)
         os.remove(self.book_plan_proposal_path)

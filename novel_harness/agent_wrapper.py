@@ -246,13 +246,16 @@ class AgentSession:
             )
         return result
 
-    def continue_chapter(self, chapter_id: str, edited_text: str | None = None) -> dict:
+    def continue_chapter(self, chapter_id: str, edited_text: str | None = None, on_chunk: Callable[[str], None] | None = None) -> dict:
         """The fast, repeatable co-writing loop: appends one continuation segment (not a rewrite)
         and updates the bible from it -- 2 model calls, not generate's up to ~13. `edited_text`,
         if given, is saved as the chapter's current text first, so it's how a caller (the web UI's
         editor, or an agent doing paragraph-by-paragraph co-writing) hands over its own edits as
-        settled canon before the model continues from them."""
-        result = continue_and_extract(LLMClient(model=self.model), self.project, chapter_id, edited_text, progress=self.progress)
+        settled canon before the model continues from them. `on_chunk`, if given, receives each
+        raw streamed piece of the new text the instant it arrives (see pipeline.continue_chapter);
+        the CLI/an agent has no use for it and just omits it -- the web UI's job engine is what
+        wires it up, for real character-by-character display."""
+        result = continue_and_extract(LLMClient(model=self.model), self.project, chapter_id, edited_text, progress=self.progress, on_chunk=on_chunk)
         result["chapter"] = asdict(result["chapter"])
         return result
 

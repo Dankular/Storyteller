@@ -147,6 +147,11 @@ button.danger { color: var(--danger); border-color: var(--danger); background: t
 .manuscript-editor {
   font-family: Georgia, serif; font-size: 1rem; line-height: 1.6;
   background: var(--bg-alt); padding: 1rem; border-radius: 8px; resize: vertical;
+  border: 1px solid var(--border);
+}
+.manuscript-editor.streaming {
+  border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent);
+  cursor: text; caret-color: var(--accent);
 }
 .send-row { display: flex; align-items: center; gap: 1rem; margin-top: 0.75rem; }
 .send-button { font-size: 1rem; padding: 0.6rem 1.4rem; display: inline-flex; align-items: center; gap: 0.4rem; }

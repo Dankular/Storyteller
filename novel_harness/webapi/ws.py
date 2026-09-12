@@ -30,6 +30,8 @@ async def job_progress(websocket: WebSocket, job_id: str):
     # (GET /api/jobs/{id} always has the final state) recovers if it's ever hit.
     for line in job.progress:
         await websocket.send_json({"type": "progress", "line": line})
+    if job.streamed_text:
+        await websocket.send_json({"type": "chunk", "text": job.streamed_text})
 
     if job.status in ("succeeded", "failed"):
         await websocket.send_json({
