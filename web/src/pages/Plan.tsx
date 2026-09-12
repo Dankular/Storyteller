@@ -28,6 +28,7 @@ export function Plan() {
   const [searchDepth, setSearchDepth] = useState(3)
   const [searchBranching, setSearchBranching] = useState(3)
   const [searchBeamWidth, setSearchBeamWidth] = useState(3)
+  const [searchUseLlmJudgment, setSearchUseLlmJudgment] = useState(true)
   const [searchJobId, setSearchJobId] = useState<string | null>(null)
   const searchJob = useJob(searchJobId)
 
@@ -92,7 +93,7 @@ export function Plan() {
   const runOutlineSearch = async () => {
     if (!projectId) return
     setError(null)
-    const { job_id } = await startOutlineSearch(projectId, searchDepth, searchBranching, searchBeamWidth)
+    const { job_id } = await startOutlineSearch(projectId, searchDepth, searchBranching, searchBeamWidth, searchUseLlmJudgment)
     setSearchJobId(job_id)
     track(job_id, `Outline search (depth ${searchDepth})`)
   }
@@ -162,10 +163,11 @@ export function Plan() {
 
       <h2>Search the outline</h2>
       <p className="hint">
-        Beam search over candidate outline continuations, scored by pure-Python bible checks
-        (dependency/relationship-tension/promise-payoff/beat coverage) instead of an LLM judging
-        prose that doesn't exist yet -- see AGENTS.md. Nothing is committed until you pick a branch
-        below and then Commit as usual.
+        Beam search over candidate outline continuations. Scored two ways, layered together: a
+        pure-Python structural check (dependency/relationship-tension/promise-payoff/beat
+        coverage) plus, by default, an actual LLM judgment call rating each option's narrative
+        interest -- the one dimension the structural check can't see. See AGENTS.md.
+        Nothing is committed until you pick a branch below and then Commit as usual.
       </p>
       <div className="plan-form">
         <label>
@@ -180,6 +182,10 @@ export function Plan() {
           Beam width (branches kept)
           <input type="number" value={searchBeamWidth} onChange={(e) => setSearchBeamWidth(Number(e.target.value))} />
         </label>
+        <label>
+          <input type="checkbox" checked={searchUseLlmJudgment} onChange={(e) => setSearchUseLlmJudgment(e.target.checked)} />
+          Use LLM judgment for narrative interest (roughly doubles the call count; off falls back to structural score only)
+        </label>
         <button onClick={runOutlineSearch} disabled={searchJob.status === 'running'}>
           {searchJob.status === 'running' ? 'Searching…' : 'Search'}
         </button>
@@ -191,6 +197,14 @@ export function Plan() {
             <li key={i}>
               <strong>Branch {i + 1}</strong> -- score {b.score.toFixed(1)}
               <p>{b.chapters.map((c) => `${c.id}: ${c.title}`).join(' -> ')}</p>
+              {b.reward_breakdown.some((r) => r.llm_interest_why) && (
+                <p className="hint">
+                  {b.reward_breakdown
+                    .map((r, j) => (r.llm_interest_why ? `${b.chapters[j].id}: ${r.llm_interest_why}` : null))
+                    .filter(Boolean)
+                    .join(' / ')}
+                </p>
+              )}
               <button onClick={() => useBranch(b)}>Use this branch</button>
             </li>
           ))}

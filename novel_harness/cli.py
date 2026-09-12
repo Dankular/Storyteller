@@ -403,6 +403,7 @@ def cmd_outline_search(args):
     chapters = project.load_outline()
     branches = search_outline_continuations(
         client, state, chapters, depth=args.depth, branching=args.branching, beam_width=args.beam_width,
+        use_llm_judgment=not args.no_llm_judgment, judge_weight=args.judge_weight,
         progress=lambda m: print(f"[{time.strftime('%H:%M:%S')}] {m}"),
     )
     for i, b in enumerate(branches):
@@ -1013,10 +1014,12 @@ def build_parser():
     sp.add_argument("--model", default=DEFAULT_MODEL)
     sp.set_defaults(func=cmd_swerve_propose)
 
-    sp = sub.add_parser("outline-search", help="Beam search over candidate outline continuations, scored by pure-Python bible checks (dependency/relationship/promise/beat coverage) -- see pipeline.search_outline_continuations. Nothing is committed.")
+    sp = sub.add_parser("outline-search", help="Beam search over candidate outline continuations, scored by a pure-Python structural check AND (by default) an LLM judgment call for narrative interest -- see pipeline.search_outline_continuations. Nothing is committed.")
     sp.add_argument("--depth", type=int, default=3, help="How many chapters ahead to search")
     sp.add_argument("--branching", type=int, default=3, help="Distinct next-chapter options explored per branch per step")
     sp.add_argument("--beam-width", type=int, default=3, dest="beam_width", help="How many top branches to keep at each step")
+    sp.add_argument("--no-llm-judgment", action="store_true", dest="no_llm_judgment", help="Score branches by the pure-Python structural check only, skipping the LLM narrative-interest judgment call (roughly halves the call count)")
+    sp.add_argument("--judge-weight", type=float, default=1.0, dest="judge_weight", help="Multiplier on the LLM judgment score's contribution to a branch's total reward")
     sp.add_argument("--model", default=DEFAULT_MODEL)
     sp.set_defaults(func=cmd_outline_search)
 

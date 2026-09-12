@@ -181,7 +181,10 @@ export interface AffectedChapter {
 export interface OutlineBranch {
   chapters: Record<string, unknown>[]
   score: number
-  reward_breakdown: Record<string, number>[]
+  // Each entry mixes numeric structural-check components (dependency_penalty, ...) with, when the
+  // LLM judgment layer ran, llm_interest_score (number) and llm_interest_why (string) -- see
+  // pipeline.search_outline_continuations/judge_branch_options.
+  reward_breakdown: Record<string, number | string>[]
 }
 
 export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed'

@@ -234,14 +234,21 @@ concrete instead of asking the model to invent from a blank page:
   that library, which hard-requires `torch`/`transformers`/`bitsandbytes`/`peft`/`fairscale` (a
   local-model-serving research stack, per its `setup.py`) this project deliberately doesn't carry.
   The pattern is scoped to the one place it actually fits: a "state" here is a cheap beat-sheet call
-  (`propose_outline_branches`, not a drafted chapter), and the reward
-  (`_score_branch_step`) is `check_dependencies`/`check_relationship_tensions`/promise-payoff/
-  beat-coverage — pure Python, exact, and cheap, unlike judging prose that doesn't exist yet at plan
-  time. That's also why beam search was picked over MCTS: with a small branching factor and an
-  exact, cheap reward, there's no need for MCTS's rollout/backpropagation machinery. Cost is at most
-  `depth * beam_width` JSON calls (defaults: at most 7, no prose generated). Nothing is committed —
-  pick a branch and it becomes the pending outline proposal, from which the normal
-  `outline-commit-proposal` review/commit flow applies unchanged.
+  (`propose_outline_branches`, not a drafted chapter). The reward is **two layers, not one**:
+  `_score_branch_step` — `check_dependencies`/`check_relationship_tensions`/promise-payoff/
+  beat-coverage, pure Python, exact, cheap, but structurally blind to whether an option is any
+  *good* — plus, by default (`--no-llm-judgment` to skip it), an actual LLM call
+  (`judge_branch_options`) rating the same candidate set for narrative interest: which option is
+  the safest, most predictable continuation versus which one takes a real risk. That second layer
+  is exactly the thing pure-Python checks cannot do, deliberately layered on top of the exact one
+  rather than in place of it — the judged score is rescaled (`(score-5)/2`) and weighted
+  (`judge_weight`, default 1.0) before being added, so neither layer silently dominates. Beam
+  search was still picked over MCTS: with a small branching factor and a reward that's cheap either
+  way, there's no need for MCTS's rollout/backpropagation machinery. Cost is at most
+  `depth * beam_width * (1 or 2)` JSON calls (defaults with judgment on: at most 14; off: at most 7
+  — still no prose generated either way). Nothing is committed — pick a branch and it becomes the
+  pending outline proposal, from which the normal `outline-commit-proposal` review/commit flow
+  applies unchanged.
 
 ### POV / voice persistence
 
@@ -486,13 +493,16 @@ the dependency graph is shown as a list, not an interactive diagram, in this fir
   a chapter isn't explicitly tagged with `--structural-beat`; an explicit tag always
   wins, and unbounded books (`target_chapters = 0`) skip position-based guessing
   entirely.
-- **`outline-search`'s reward function only ever scores structural health, never narrative
-  interest or prose quality** — at plan time there's no prose yet, only a beat-sheet, so
-  `_score_branch_step` can check "does this introduce a dependency violation / claim an
-  unclaimed beat / advance an overdue promise" and nothing about whether the resulting chapter
-  would actually be any good to read. A high-scoring branch is a structurally sound one, not
-  necessarily the most interesting one — review the branches yourself before picking one, the
-  same way you'd review any other proposal.
+- **`outline-search`'s LLM-judgment layer inherits every weakness of asking a model to rate its
+  own output** — `judge_branch_options` is a real judgment call, not a rubber stamp, but it's
+  still an LLM scoring beat-sheets that read equally plausibly at a glance; a consistently
+  higher score for one option over another is a signal worth weighing, not proof that option
+  is actually better. The pure-Python half (`_score_branch_step`) is exact only about what it
+  checks — a dependency violation, an unclaimed beat, an overdue promise — never about whether
+  the resulting chapter would be any good to read; that's what the judgment layer is *for*, and
+  also exactly where its own unreliability lives. Review the branches yourself before picking
+  one, the same way you'd review any other proposal — a high total score means "structurally
+  sound, and an LLM preferred it," not "definitely the right choice."
 - **`swerve-propose`'s structural material is a lower bound on what's interesting, not an
   exhaustive one** — it only surfaces relationships you've actually recorded and characters
   that exist in the bible; a swerve worth having that depends on something never entered as a

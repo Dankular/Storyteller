@@ -198,14 +198,19 @@ class AgentSession:
         (typically as a new plot_thread) if it's worth pursuing. See pipeline.propose_swerve."""
         return propose_swerve(LLMClient(model=self.model), self._state())
 
-    def outline_search(self, depth: int = 3, branching: int = 3, beam_width: int = 3) -> dict:
-        """Beam search over candidate outline continuations, scored by pure-Python bible checks --
-        see pipeline.search_outline_continuations. Nothing is committed; pick a branch from the
-        result and pass its `chapters` to outline_search_select to stage it for the normal
-        outline-commit-proposal review/commit flow."""
+    def outline_search(
+        self, depth: int = 3, branching: int = 3, beam_width: int = 3,
+        use_llm_judgment: bool = True, judge_weight: float = 1.0,
+    ) -> dict:
+        """Beam search over candidate outline continuations, scored by a pure-Python structural
+        check AND (by default) an actual LLM judgment call for narrative interest, layered on top
+        -- see pipeline.search_outline_continuations for how the two combine. Nothing is
+        committed; pick a branch from the result and pass its `chapters` to outline_search_select
+        to stage it for the normal outline-commit-proposal review/commit flow."""
         branches = search_outline_continuations(
             LLMClient(model=self.model), self._state(), self.project.load_outline(),
-            depth=depth, branching=branching, beam_width=beam_width, progress=self.progress,
+            depth=depth, branching=branching, beam_width=beam_width,
+            use_llm_judgment=use_llm_judgment, judge_weight=judge_weight, progress=self.progress,
         )
         return {"branches": [asdict(b) for b in branches]}
 
@@ -393,6 +398,8 @@ def _dispatch(session: AgentSession, action: str, payload: dict) -> dict:
         return session.outline_search(
             depth=int(payload.get("depth", 3)), branching=int(payload.get("branching", 3)),
             beam_width=int(payload.get("beam_width", 3)),
+            use_llm_judgment=bool(payload.get("use_llm_judgment", True)),
+            judge_weight=float(payload.get("judge_weight", 1.0)),
         )
     if action == "outline_search_select": return session.outline_search_select(payload["chapters"])
     raise ValueError(f"Unknown action '{action}'")

@@ -265,6 +265,16 @@ the same idea. Each option must independently make sense as a real next chapter 
 pov MUST be one of the existing characters listed, unless none exist yet, in which case invent one \
 consistent with the premise. Do not write prose, only beats."""
 
+BRANCH_JUDGE_SYSTEM = """You judge candidate next-chapter options for narrative interest -- which one \
+would make the most engaging, surprising, or dramatically valuable next chapter, given the story so \
+far. This is a judgment call about interest and craft, not structure -- a separate pure-mechanical pass \
+already checks for dependency/continuity issues, so ignore that dimension entirely and focus on: does \
+this option feel like the safest/most predictable continuation, or does it take a real risk; does it \
+give the story somewhere more interesting to go; would a reader want to keep reading. Return JSON:
+{"scores": [{"id": "<option id, exactly as given>", "score": <1-10, higher = more interesting>, "why": "<one sentence>"}]}
+Score EVERY option given, even ones you don't prefer -- do not omit any, and do not judge structural \
+correctness, only how interesting each option actually is."""
+
 BOOK_PLAN_SYSTEM = """You are a novel outliner planning the REST of a book's chapter structure in one \
 pass -- not just the next few chapters, everything from here to the ending. This is the single most \
 important lever for setups actually paying off: because you can see the whole remaining arc at once, \
@@ -875,6 +885,34 @@ def propose_outline_branches(client: LLMClient, state: ProjectState, chapters: L
     return result.get("options", [])[:n]
 
 
+def judge_branch_options(
+    client: LLMClient, state: ProjectState, chapters_so_far: List[Chapter], options: List[dict],
+) -> Dict[str, Tuple[float, str]]:
+    """An LLM-judged reward, layered ON TOP of _score_branch_step's pure-Python structural score --
+    not a replacement for it. The pure-Python pass catches hard, exact violations (a dependency
+    reference out of order, a beat claiming ground already covered) but is structurally blind to
+    whether any option is actually any good; this asks the model the thing Python cannot check --
+    which option is more narratively interesting -- over the SAME cheap candidate set (still no
+    prose generated, one JSON call scoring every option together, not one call per option).
+    Returns {option_id: (score 1-10, one-line reason)}; an id the model didn't return a score for
+    is simply absent, left to whatever default the caller applies."""
+    brief = (
+        _outline_brief(state, chapters_so_far) + "\n\nCandidate options for the next chapter:\n"
+        + json.dumps(options, indent=2)
+    )
+    result = client.call_json(BRANCH_JUDGE_SYSTEM, brief, max_tokens=1500)
+    scores: Dict[str, Tuple[float, str]] = {}
+    for entry in result.get("scores", []):
+        oid = entry.get("id")
+        if oid:
+            try:
+                score = float(entry.get("score", 5))
+            except (TypeError, ValueError):
+                score = 5.0
+            scores[oid] = (score, entry.get("why", ""))
+    return scores
+
+
 def _dict_to_chapter(d: dict) -> Chapter:
     """A proposed-but-not-committed chapter dict (from plan_outline/propose_outline_branches),
     rehydrated just enough to run the pure-Python checks (check_dependencies,
@@ -938,26 +976,38 @@ class OutlineBranch:
 
 def search_outline_continuations(
     client: LLMClient, state: ProjectState, chapters: List[Chapter],
-    depth: int = 3, branching: int = 3, beam_width: int = 3, progress: Optional[Progress] = None,
+    depth: int = 3, branching: int = 3, beam_width: int = 3,
+    use_llm_judgment: bool = True, judge_weight: float = 1.0,
+    progress: Optional[Progress] = None,
 ) -> List[OutlineBranch]:
     """Beam search over candidate outline continuations. Native reimplementation of the World
     Model / Search Config / Search Algorithm pattern from maitrix-org/llm-reasoners: `state` is a
     hypothetical outline-so-far, the "action space" is propose_outline_branches' distinct options
     for the next chapter (the World Model's cheap state-generation step -- a beat-sheet call, not
-    a drafted chapter), and the reward is _score_branch_step's pure-Python bible checks (the
-    Search Config, standing in for that library's log-likelihood/goal-check scoring). Beam search
-    was picked over MCTS/DFS because the branching factor and depth here are both small and the
-    reward is cheap and exact -- there's no need for MCTS's rollout/backpropagation machinery when
-    every node can just be scored directly.
+    a drafted chapter), and the reward is TWO layers, not one:
+      1. _score_branch_step -- pure-Python bible checks (dependency/relationship/promise/beat
+         coverage). Cheap, exact, but structurally blind to whether anything is actually
+         interesting -- it can only tell you an option is *valid*, never that it's *good*.
+      2. judge_branch_options -- an actual LLM judgment call, when `use_llm_judgment` is true
+         (the default), scoring the same candidate set for narrative interest: which option is
+         the safest/most predictable continuation vs. which takes a real risk. This is exactly
+         the dimension pure-Python checks cannot cover, layered ON TOP of them, not instead of
+         them -- weighted by `judge_weight` (the raw 1-10 score is rescaled to roughly the same
+         magnitude as the structural deltas below, via `(score - 5) / 2`, before being multiplied
+         by the weight, so neither layer silently dominates the other by default).
+    Beam search was picked over MCTS/DFS because the branching factor and depth here are both
+    small and the reward is cheap -- there's no need for MCTS's rollout/backpropagation machinery
+    when every node can just be scored directly.
 
     Nothing is committed: returns the top `beam_width` branches, `depth` chapters deep, sorted
     best-first. The caller reviews (agent_wrapper.outline_search) and, to actually use one, saves
     its `chapters` as the pending outline proposal (agent_wrapper.outline_search_select) -- from
     there the normal outline-commit-proposal review/commit flow applies unchanged.
 
-    Cost: depth * beam_width calls in the worst case (each producing `branching` cheap JSON
-    options, not prose) -- e.g. the defaults (3, 3, 3) cost at most 1 + 3 + 3 = 7 calls total,
-    since the first step only has one beam to expand."""
+    Cost: depth * beam_width * (1 or 2) calls in the worst case, all cheap JSON, no prose -- e.g.
+    the defaults (3, 3, 3, judgment on) cost at most (1 + 3 + 3) * 2 = 14 calls total, since the
+    first step only has one beam to expand. Set `use_llm_judgment=False` to fall back to the
+    pure-Python-only reward and roughly half that cost."""
     beams: List[OutlineBranch] = [OutlineBranch(chapters=[], score=0.0, reward_breakdown=[])]
     for step in range(depth):
         if progress:
@@ -966,8 +1016,25 @@ def search_outline_continuations(
         for branch in beams:
             hypothetical_chapters = chapters + [_dict_to_chapter(c) for c in branch.chapters]
             options = propose_outline_branches(client, state, hypothetical_chapters, n=branching)
+            if not options:
+                continue
+            judged: Dict[str, Tuple[float, str]] = {}
+            if use_llm_judgment:
+                try:
+                    judged = judge_branch_options(client, state, hypothetical_chapters, options)
+                except Exception as error:  # noqa: BLE001 -- a judgment failure degrades to the pure-Python score, never blocks the search
+                    if progress:
+                        progress(f"Branch judgment failed, falling back to structural score only: {error}")
             for opt in options:
                 delta, breakdown = _score_branch_step(state, hypothetical_chapters, opt)
+                oid = opt.get("id")
+                if oid and oid in judged:
+                    llm_score, why = judged[oid]
+                    llm_delta = ((llm_score - 5.0) / 2.0) * judge_weight
+                    breakdown["llm_interest_score"] = llm_score
+                    breakdown["llm_interest_delta"] = llm_delta
+                    breakdown["llm_interest_why"] = why
+                    delta += llm_delta
                 candidates.append(OutlineBranch(
                     chapters=branch.chapters + [opt],
                     score=branch.score + delta,

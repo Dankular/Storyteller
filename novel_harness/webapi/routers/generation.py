@@ -124,9 +124,10 @@ def swerve_propose(project_id: str):
 
 @router.post("/outline-search")
 def outline_search(project_id: str, payload: dict | None = Body(default=None)):
-    """{"depth": 3, "branching": 3, "beam_width": 3} -- beam search over candidate outline
-    continuations, scored by pure-Python bible checks. See AgentSession.outline_search/
-    pipeline.search_outline_continuations. Nothing is committed."""
+    """{"depth": 3, "branching": 3, "beam_width": 3, "use_llm_judgment": true, "judge_weight": 1.0}
+    -- beam search over candidate outline continuations, scored by a pure-Python structural check
+    AND (by default) an LLM judgment call for narrative interest, layered on top. See
+    AgentSession.outline_search/pipeline.search_outline_continuations. Nothing is committed."""
     payload = payload or {}
 
     def work(progress, on_chunk):
@@ -134,6 +135,8 @@ def outline_search(project_id: str, payload: dict | None = Body(default=None)):
         return session.outline_search(
             depth=int(payload.get("depth", 3)), branching=int(payload.get("branching", 3)),
             beam_width=int(payload.get("beam_width", 3)),
+            use_llm_judgment=bool(payload.get("use_llm_judgment", True)),
+            judge_weight=float(payload.get("judge_weight", 1.0)),
         )
 
     job = job_manager.create("outline_search", project_id, work)

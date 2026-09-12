@@ -149,10 +149,12 @@ export const startAudit = (id: string) =>
   request<{ job_id: string }>(`/api/projects/${id}/audit`, { method: 'POST' })
 export const startSwerve = (id: string) =>
   request<{ job_id: string }>(`/api/projects/${id}/swerve`, { method: 'POST' })
-export const startOutlineSearch = (id: string, depth: number, branching: number, beamWidth: number) =>
+export const startOutlineSearch = (
+  id: string, depth: number, branching: number, beamWidth: number, useLlmJudgment = true,
+) =>
   request<{ job_id: string }>(`/api/projects/${id}/outline-search`, {
     method: 'POST',
-    body: json({ depth, branching, beam_width: beamWidth }),
+    body: json({ depth, branching, beam_width: beamWidth, use_llm_judgment: useLlmJudgment }),
   })
 export const selectOutlineSearchBranch = (id: string, chapters: Record<string, unknown>[]) =>
   request<Record<string, unknown>>(`/api/projects/${id}/outline-search/select`, {
