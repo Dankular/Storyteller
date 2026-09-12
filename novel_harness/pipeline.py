@@ -8,6 +8,7 @@ draft before it's revised, or edit extracted facts before they're merged into
 the bible) instead of running the whole thing unattended.
 """
 from __future__ import annotations
+import copy
 import json
 import os
 import time
@@ -277,6 +278,16 @@ guarded?). Base it on the character description and any excerpts given. Output o
 sentences, no headers or commentary."""
 
 
+CONTINUE_SYSTEM = """You are a skilled novelist continuing a chapter of a novel already in \
+progress, with the author actively steering it. You'll be given the chapter's beats, story bible \
+context, and everything written in this chapter SO FAR -- including the author's own edits, which \
+are settled canon, not a draft to second-guess. Write the NEXT segment of prose, picking up \
+immediately from where the existing text leaves off. Do not repeat, summarize, or restate anything \
+already written, and do not wrap up or conclude the chapter unless the beats and what's already \
+written make that the obvious next beat. Match the established voice exactly. Output only the new \
+continuation text, nothing else."""
+
+
 def build_draft_system(state: ProjectState) -> str:
     system = DRAFT_SYSTEM_BASE + TENSION_DISCIPLINE_NOTE
     if state.genre_beats:
@@ -302,6 +313,30 @@ def draft_chapter(
     text = client.call(build_draft_system(state), context, max_tokens=8192, on_token=_token_reporter(progress, "Draft", expected_chars=expected_chars))
     if progress:
         progress(f"Draft done: {len(text.split())} words.")
+    return text
+
+
+def continue_chapter(
+    client: LLMClient, project: Project, state: ProjectState, chapters: List[Chapter], chapter: Chapter,
+    existing_text: str, progress: Optional[Progress] = None,
+) -> str:
+    """One model call, returning only the NEW segment to append -- not a rewrite. Reuses
+    build_chapter_context() entirely (bible/promises/structural-beat/voice guidance) rather than
+    forking it; the appended "written so far" section plus CONTINUE_SYSTEM's own instructions are
+    what make this a continuation instead of a fresh draft, so the context-assembly logic itself
+    never has to know which mode it's serving."""
+    if progress:
+        progress(f"Continuing '{chapter.title}'...")
+    context = build_chapter_context(project, state, chapters, chapter)
+    written_block = existing_text.strip() or "(nothing yet -- this is the opening of the chapter)"
+    brief = context + f"\n\n## Written so far in this chapter (continue from here -- do not repeat it)\n{written_block}"
+    remaining_chars = max(0, chapter.word_target * 5.5 - len(existing_text))
+    text = client.call(
+        CONTINUE_SYSTEM, brief, max_tokens=4096,
+        on_token=_token_reporter(progress, "Continue", expected_chars=remaining_chars or None),
+    )
+    if progress:
+        progress(f"Continuation done: {len(text.split())} words.")
     return text
 
 
@@ -976,3 +1011,75 @@ def generate_chapter(
     if progress:
         progress(f"Chapter '{chapter.id}' complete -> status={chapter.status}.")
     return chapter
+
+
+def continue_and_extract(
+    client: LLMClient, project: Project, chapter_id: str,
+    edited_text: Optional[str] = None, progress: Optional[Progress] = None,
+) -> dict:
+    """The NovelAI-style "Send" button: appends one continuation segment to a chapter instead of
+    drafting/rewriting the whole thing, and keeps the bible in sync as it goes -- a lighter,
+    faster sibling to generate_chapter() (2 model calls, not up to ~13), for repeated clicking
+    rather than a one-shot full editorial pass (that's still what generate_chapter/"Regenerate
+    this chapter" is for).
+
+    edited_text, if given, is saved as the chapter's current text FIRST, before anything else --
+    this is what captures the user's own selection/delete/reword edits (made directly in the
+    editor) as settled canon before the model continues from them. None means "continue from
+    whatever's already on disk," e.g. for a non-interactive caller that isn't tracking the text
+    itself.
+    """
+    state = project.load_state()
+    chapters = project.load_outline()
+    chapter = project.get_chapter(chapter_id)
+
+    if edited_text is not None:
+        project.save_chapter_text(chapter_id, edited_text)
+        existing_text = edited_text
+    else:
+        existing_text = project.load_chapter_text(chapter_id)
+
+    new_text = continue_chapter(client, project, state, chapters, chapter, existing_text, progress=progress)
+    full_text = f"{existing_text.rstrip()}\n\n{new_text.strip()}" if existing_text.strip() else new_text.strip()
+    project.save_chapter_text(chapter_id, full_text)
+
+    if chapter.status == "planned":
+        chapter.status = "drafted"
+    chapter.file = project.chapter_text_path(chapter_id)
+    project.update_chapter(chapter)
+
+    characters_before = copy.deepcopy(state.characters)
+    try:
+        state = extract_and_update_state(client, state, full_text, chapter_id, progress=progress)
+    except Exception as error:  # noqa: BLE001 -- same resilience boundary generate_chapter's _safe_stage gives extraction
+        if progress:
+            progress(f"Fact extraction failed, skipping it (chapter text is unaffected): {error}")
+        project.add_continuity_flags([
+            ContinuityFlag(chapter_id=chapter_id, issue=f"Fact extraction did not complete: {error}", severity="note", kind="pipeline_error")
+        ])
+        characters_created: List[str] = []
+        characters_updated: List[str] = []
+    else:
+        characters_created = [name for name in state.characters if name not in characters_before]
+        characters_updated = [
+            name for name, char in state.characters.items()
+            if name in characters_before and char != characters_before[name]
+        ]
+
+        staleness_flags = audit_promise_staleness(state, chapters, chapter_id)
+        if staleness_flags:
+            project.add_continuity_flags(staleness_flags)
+
+        dependency_flags = check_dependencies(state, chapters)
+        if dependency_flags:
+            project.add_continuity_flags(dependency_flags)
+
+        project.save_state(state)
+
+    if progress:
+        progress(f"Chapter '{chapter_id}' continued -> {len(full_text.split())} words total.")
+
+    return {
+        "chapter": chapter, "text": full_text, "appended": new_text,
+        "characters_created": characters_created, "characters_updated": characters_updated,
+    }

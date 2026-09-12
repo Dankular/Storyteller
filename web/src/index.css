@@ -144,6 +144,13 @@ button.danger { color: var(--danger); border-color: var(--danger); background: t
   white-space: pre-wrap; background: var(--bg-alt); padding: 1rem; border-radius: 8px;
   font-family: Georgia, serif; line-height: 1.6; max-height: 70vh; overflow-y: auto;
 }
+.manuscript-editor {
+  font-family: Georgia, serif; font-size: 1rem; line-height: 1.6;
+  background: var(--bg-alt); padding: 1rem; border-radius: 8px; resize: vertical;
+}
+.send-row { display: flex; align-items: center; gap: 1rem; margin-top: 0.75rem; }
+.send-button { font-size: 1rem; padding: 0.6rem 1.4rem; display: inline-flex; align-items: center; gap: 0.4rem; }
+.character-note { color: var(--success); font-size: 0.85rem; }
 
 .modal-backdrop {
   position: fixed; inset: 0; background: rgba(0, 0, 0, 0.4);

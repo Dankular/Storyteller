@@ -26,8 +26,8 @@ from .depgraph import build_dependency_graph, check_dependencies
 from .llm import DEFAULT_MODEL, LLMClient
 from .models import Character, Chapter, Location, PlotThread, Promise
 from .pipeline import (
-    apply_genre, audit_manuscript, generate_chapter, generate_character_sheet, generate_title,
-    plan_book, plan_outline,
+    apply_genre, audit_manuscript, continue_and_extract, generate_chapter, generate_character_sheet,
+    generate_title, plan_book, plan_outline,
 )
 from .storage import Project
 
@@ -246,6 +246,16 @@ class AgentSession:
             )
         return result
 
+    def continue_chapter(self, chapter_id: str, edited_text: str | None = None) -> dict:
+        """The fast, repeatable co-writing loop: appends one continuation segment (not a rewrite)
+        and updates the bible from it -- 2 model calls, not generate's up to ~13. `edited_text`,
+        if given, is saved as the chapter's current text first, so it's how a caller (the web UI's
+        editor, or an agent doing paragraph-by-paragraph co-writing) hands over its own edits as
+        settled canon before the model continues from them."""
+        result = continue_and_extract(LLMClient(model=self.model), self.project, chapter_id, edited_text, progress=self.progress)
+        result["chapter"] = asdict(result["chapter"])
+        return result
+
     def audit(self) -> dict:
         flags = audit_manuscript(LLMClient(model=self.model), self.project, self.project.load_outline(), progress=self.progress)
         if flags: self.project.add_continuity_flags(flags)
@@ -275,7 +285,8 @@ class AgentSession:
 _ACTIONS = [
     "init", "snapshot", "update_bible", "add_chapters", "update_chapter", "remove", "rename",
     "promise_resolve", "continuity_resolve", "voice_search", "voice_assign", "character_generate",
-    "title_generate", "dependency_graph", "dependency_check", "plan", "commit", "generate", "audit",
+    "title_generate", "dependency_graph", "dependency_check", "plan", "commit", "generate",
+    "continue_chapter", "audit",
 ]
 
 
@@ -305,6 +316,7 @@ def _dispatch(session: AgentSession, action: str, payload: dict) -> dict:
     if action == "plan": return session.plan(int(payload.get("count", 3)), bool(payload.get("whole_book", False)))
     if action == "commit": return session.commit(bool(payload.get("whole_book", False)))
     if action == "generate": return session.generate(payload["chapter_id"], payload.get("options"))
+    if action == "continue_chapter": return session.continue_chapter(payload["chapter_id"], payload.get("edited_text"))
     if action == "audit": return session.audit()
     raise ValueError(f"Unknown action '{action}'")
 

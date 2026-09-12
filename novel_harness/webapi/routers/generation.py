@@ -28,6 +28,22 @@ def generate_chapter(project_id: str, chapter_id: str, payload: dict | None = Bo
     return {"job_id": job.id}
 
 
+@router.post("/chapters/{chapter_id}/continue")
+def continue_chapter(project_id: str, chapter_id: str, payload: dict | None = Body(default=None)):
+    """{"edited_text": "..."} -- the "Send" button: saves edited_text as the chapter's current
+    text (capturing whatever the editor's textarea holds, including the user's own
+    selection/delete/reword edits), appends one continuation segment, and updates the bible from
+    the result. Cheap enough (2 model calls) to click repeatedly, unlike /generate's full pipeline."""
+    edited_text = (payload or {}).get("edited_text")
+
+    def work(progress):
+        session = get_session(project_id, progress=progress)
+        return session.continue_chapter(chapter_id, edited_text)
+
+    job = job_manager.create("continue", project_id, work)
+    return {"job_id": job.id}
+
+
 @router.post("/plan")
 def plan(project_id: str, payload: dict | None = Body(default=None)):
     """{"count": 3, "whole_book": false}"""

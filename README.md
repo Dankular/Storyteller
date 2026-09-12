@@ -285,7 +285,7 @@ npm run dev   # proxies /api and /ws to the backend on :8000 -- see web/vite.con
 Open the printed Vite URL, add a project by path (the directory must already have `state.json` --
 `init`/`new` it with the CLI first), and it opens in the library.
 
-Long-running operations (`generate`, `plan`, `audit`) run as background jobs
+Long-running operations (`generate`, `continue`, `plan`, `audit`) run as background jobs
 (`novel_harness/webapi/jobs.py`) so the browser doesn't block on a multi-minute chapter draft --
 every pipeline function that already accepted a `progress` callback streams its lines live over a
 WebSocket (`/ws/jobs/{id}`) the moment they're produced, the same lines the CLI would print to
@@ -293,6 +293,15 @@ stderr. Editing a character (rename, change fields) doesn't cascade automaticall
 the dependency graph for which chapters reference the edited entity and lets you pick which ones,
 if any, to actually regenerate -- nothing is regenerated without an explicit choice, since that
 overwrites drafted prose.
+
+A chapter's manuscript is an editable textarea, not read-only: select, delete, or reword anything
+in it, then **Send** -- this calls `continue_and_extract()` (`pipeline.py`), which saves your edits
+as the chapter's current text first, then appends one continuation segment picking up from exactly
+that (not a rewrite) and runs fact extraction on the result, so the bible updates as you go. It's
+two model calls, fast enough to click repeatedly, unlike **Full rewrite** (the old "Regenerate this
+chapter," `generate_chapter()`'s complete critique/revise/all-checks pipeline, up to ~13 calls,
+which replaces the whole text). Same split is available to agents: `generate` vs. the lighter
+`continue_chapter` action in `agent_wrapper.py`.
 
 For production, `npm run build` in `web/` produces `web/dist/`, which `novel_harness.webapi.app`
 serves automatically (as static files) if present -- one process, no separate frontend server

@@ -108,6 +108,11 @@ export const startGenerate = (id: string, chapterId: string, options?: Record<st
     method: 'POST',
     body: json({ options }),
   })
+export const startContinue = (id: string, chapterId: string, editedText: string) =>
+  request<{ job_id: string }>(`/api/projects/${id}/chapters/${chapterId}/continue`, {
+    method: 'POST',
+    body: json({ edited_text: editedText }),
+  })
 export const startPlan = (id: string, count: number, wholeBook: boolean) =>
   request<{ job_id: string }>(`/api/projects/${id}/plan`, {
     method: 'POST',
