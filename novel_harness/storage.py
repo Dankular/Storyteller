@@ -15,9 +15,9 @@ import json
 import os
 import re
 from dataclasses import asdict
-from typing import List
+from typing import List, Optional
 
-from .models import ProjectState, Chapter, ContinuityFlag, Character, Location, Memory, Motif, PlotThread, Promise, beat_establishes, beat_text
+from .models import ProjectState, Chapter, ContinuityFlag, Character, Location, Memory, Motif, PlotThread, Promise, Relationship, beat_establishes, beat_text
 
 
 def _register_planned_entities(state: ProjectState, chapter: Chapter) -> None:
@@ -236,6 +236,64 @@ class Project:
         self.save_state(state)
         return memory
 
+    def remove_relationship(self, relationship_id: str) -> Relationship:
+        state = self.load_state()
+        if relationship_id not in state.relationships:
+            raise KeyError(f"No such relationship: {relationship_id!r}. Existing: {', '.join(state.relationships) or '(none)'}")
+        removed = state.relationships.pop(relationship_id)
+        self.save_state(state)
+        return removed
+
+    def rename_relationship(self, old: str, new: str) -> Relationship:
+        state = self.load_state()
+        if old not in state.relationships:
+            raise KeyError(f"No such relationship: {old!r}. Existing: {', '.join(state.relationships) or '(none)'}")
+        if new in state.relationships:
+            raise ValueError(f"A relationship with id {new!r} already exists.")
+        rel = state.relationships.pop(old)
+        rel.id = new
+        state.relationships[new] = rel
+        self.save_state(state)
+        return rel
+
+    def resolve_relationship(self, relationship_id: str) -> Relationship:
+        state = self.load_state()
+        if relationship_id not in state.relationships:
+            raise KeyError(f"No such relationship: {relationship_id!r}. Existing: {', '.join(state.relationships) or '(none)'}")
+        rel = state.relationships[relationship_id]
+        rel.status = "resolved"
+        self.save_state(state)
+        return rel
+
+    def promote_motif_candidate(self, candidate_id: str, motif_id: Optional[str] = None, notes: Optional[str] = None) -> Motif:
+        """Turns a pending extraction-flagged motif_candidate (see models.ProjectState docstring)
+        into a real Motif -- an editorial decision a human/agent makes deliberately, unlike a
+        promise or memory, which extraction commits automatically. Removes the candidate either way
+        this succeeds; `motif_id` defaults to the candidate's own id (already a slug of its phrase)."""
+        state = self.load_state()
+        cand = next((c for c in state.motif_candidates if c.get("id") == candidate_id), None)
+        if cand is None:
+            existing = ", ".join(c.get("id", "?") for c in state.motif_candidates) or "(none)"
+            raise KeyError(f"No such motif candidate: {candidate_id!r}. Existing: {existing}")
+        mid = motif_id or cand["id"]
+        if mid in state.motifs:
+            raise ValueError(f"A motif with id {mid!r} already exists.")
+        motif = Motif(id=mid, phrase=cand["phrase"], notes=notes if notes is not None else cand.get("notes", ""))
+        state.motifs[mid] = motif
+        state.motif_candidates = [c for c in state.motif_candidates if c.get("id") != candidate_id]
+        self.save_state(state)
+        return motif
+
+    def dismiss_motif_candidate(self, candidate_id: str) -> dict:
+        state = self.load_state()
+        cand = next((c for c in state.motif_candidates if c.get("id") == candidate_id), None)
+        if cand is None:
+            existing = ", ".join(c.get("id", "?") for c in state.motif_candidates) or "(none)"
+            raise KeyError(f"No such motif candidate: {candidate_id!r}. Existing: {existing}")
+        state.motif_candidates = [c for c in state.motif_candidates if c.get("id") != candidate_id]
+        self.save_state(state)
+        return cand
+
     # ---- outline ----
     def load_outline(self) -> List[Chapter]:
         with open(self.outline_path, "r", encoding="utf-8") as f:
@@ -317,6 +375,7 @@ class Project:
                 beats=p.get("beats", []),
                 word_target=p.get("word_target", 2500),
                 structural_beat=p.get("structural_beat") or None,
+                ending_style=p.get("ending_style") or None,
             )
             chapters.append(chapter)
             added.append(chapter)
@@ -378,6 +437,7 @@ class Project:
                 beats=beats,
                 word_target=p.get("word_target", 2500),
                 structural_beat=p.get("structural_beat") or None,
+                ending_style=p.get("ending_style") or None,
             )
             chapters.append(chapter)
             existing_ids.add(cid)

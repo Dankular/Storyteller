@@ -9,19 +9,31 @@ the bible) instead of running the whole thing unattended.
 """
 from __future__ import annotations
 import copy
+import itertools
 import json
 import os
+import random
+import re
 import time
-from typing import Callable, List, Optional
+from dataclasses import dataclass
+from typing import Callable, Dict, List, Optional, Tuple
 
 from .llm import LLMClient
 from .storage import Project
-from .models import ProjectState, Chapter, ContinuityFlag, Character, Location, PlotThread, Promise, Memory, beat_text
-from .context import build_chapter_context, _resolve_structural_beat
-from .depgraph import check_dependencies
+from .models import ProjectState, Chapter, ContinuityFlag, Character, Location, PlotThread, Promise, Memory, Relationship, beat_text
+from .context import build_chapter_context, _resolve_structural_beat, _mentioned
+from .depgraph import check_dependencies, check_relationship_tensions
 from .genres import GenrePreset, match_preset, clone_preset_beats
 
 Progress = Callable[[str], None]
+
+
+def _slugify(text: str, fallback: str = "id", max_len: int = 40) -> str:
+    """Turns free text into a short id -- e.g. a motif candidate's phrase into a stable dict key,
+    the same shape the web UI's own inline slugify (Dashboard.tsx's addMotif) already produces by
+    hand, so a promoted candidate's id looks like one the user typed themselves."""
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:max_len].strip("-")
+    return slug or fallback
 
 
 def _token_reporter(progress: Optional[Progress], label: str, interval: float = 25.0, expected_chars: Optional[int] = None):
@@ -54,6 +66,21 @@ established style guide and characters. Give a character a moment or reaction ou
 defining trait wherever the scene allows it -- a character who only ever displays the one trait \
 their description leads with reads as flat, even when every line is technically consistent with it. \
 Do not break the fourth wall or add author's notes. Output only the chapter text."""
+
+# Discovery mode (models.Chapter.mode == "discovery"): the opposite of beat-by-beat execution. No
+# checklist to satisfy means no coverage check to fail, so this is the one path in the pipeline
+# where following the prose's own logic past the plan isn't a bug to be revised back into line --
+# see generate_chapter's mode branch, which skips check_beat_coverage/patch_missing_beats entirely
+# for a discovery chapter and populates `beats` retroactively (extract_beats_retroactively) instead.
+DISCOVERY_DRAFT_SYSTEM_BASE = """You are a skilled novelist ghost-writing a chapter of a novel for the \
+author, working in DISCOVERY MODE: you are given a loose direction, not a checklist of beats to hit in \
+order. Follow the direction where it naturally leads -- if a character's reaction, a line of dialogue, \
+or a detail in the scene suggests a better path than the one implied by the direction, take it. \
+Prioritize what the scene and characters would actually do over hitting a planned outcome; you are not \
+being graded on coverage of a plan. Write full, immersive prose -- not an outline or summary -- \
+consistent with the established style guide, characters, and any relational facts/tensions given. Give \
+a character a moment or reaction outside their single defining trait wherever the scene allows it. Do \
+not break the fourth wall or add author's notes. Output only the chapter text."""
 
 REVISE_SYSTEM_BASE = """You are a demanding developmental and line editor. You will be given a chapter \
 draft. Rewrite it to fix: pacing issues, flat dialogue, inconsistent voice, telling instead of \
@@ -183,13 +210,21 @@ bible. Given the chapter text and the existing story bible, return JSON with thi
   "promises_paid": ["<existing promise id from the bible that this chapter pays off>"],
   "new_memories": [{"id": "<short-slug>", "subject": "<character whose FUTURE behavior is affected>", "about": "<who/what it concerns -- usually another character's name, else empty>", "event": "<what happened, briefly>", "effect": "<how subject should act differently toward `about` in later chapters as a direct result -- a behavioral instruction, not just a fact>"}],
   "memories_resolved": ["<existing memory id from the bible that this chapter shows being forgiven/repaired/superseded>"],
+  "new_relationships": [{"id": "<short-slug>", "a": "<character/entity name>", "b": "<the other character/entity name>", "kind": "<free-text label: rivals, married, estranged siblings, acquainted, owes a debt to, ...>", "polarity": "positive|negative|neutral|complicated", "reason": "<why, briefly, if the chapter shows it>"}],
+  "relationships_changed": [{"id": "<existing relationship id from the bible>", "polarity": "<new polarity, if this chapter changed it>", "status": "<'resolved' if this chapter shows the relationship ending/mending, else omit>"}],
+  "motif_candidates": [{"phrase": "<a striking recurring line or image from THIS chapter that could resurface later with more weight>", "notes": "<why it might be worth bringing back>"}],
   "chapter_summary": "<2-4 sentence summary of what happened, for the running summary>"
 }
 Only include entries that are actually supported by the chapter text. Only flag a new_promise if it's a \
 genuine planted setup a reader would expect to matter later -- not every detail is a promise. Only flag \
 a new_memory for something that should genuinely change how one character treats another going \
 forward (a betrayal, a rescue, a lie caught, a kindness) -- not every interaction leaves this kind of \
-mark, and a character's ordinary personality or a one-off mood is a character_update, not a memory."""
+mark, and a character's ordinary personality or a one-off mood is a character_update, not a memory. \
+Only flag a new_relationship for a standing fact about how two people relate ("X and Y are now \
+enemies", "X and Y are siblings"), distinct from a memory (a one-directional behavioral consequence \
+of a specific incident) -- many chapters won't establish any. Only flag a motif_candidate for \
+something that felt genuinely striking and repeatable, not every vivid line -- leave this empty far \
+more often than not."""
 
 SUMMARY_COMPRESS_SYSTEM = """Condense this running story summary into a tighter version, \
 preserving all plot-critical facts, character developments, and open threads, but cutting \
@@ -211,13 +246,24 @@ OUTLINE_PLAN_SYSTEM = """You are a novel outliner. Given a premise, a genre's st
 story so far, existing characters, open plot threads, and promises made to the reader that are due, \
 propose the next chapters as beats -- not prose. Each proposed chapter should advance toward its nearest \
 unclaimed structural beat and give due promises a real chance to pay off. Return JSON:
-{"chapters": [{"id": "<short-slug, unique>", "title": "<...>", "pov": "<character name>", "beats": [<beat objects, see below>], "structural_beat": "<id from the beat-sheet given, or empty>", "word_target": <int>}]}
+{"chapters": [{"id": "<short-slug, unique>", "title": "<...>", "pov": "<character name>", "beats": [<beat objects, see below>], "structural_beat": "<id from the beat-sheet given, or empty>", "ending_style": "<optional: a free-text override of how THIS chapter ends, e.g. 'end quietly, let this one breathe' or 'cut away mid-sentence' -- else empty to use the book's default hook rule>", "word_target": <int>}]}
 """ + BEAT_DEPENDENCY_SCHEMA_NOTE + """
 Rules: pov MUST be one of the existing characters listed, unless none exist yet, in which case invent one \
 consistent with the premise. word_target should be a normal single-chapter length (roughly 1500-3000 \
 words) unless the genre's pacing notes clearly call for something shorter or longer -- never propose an \
-oversized multi-chapter word count. Propose exactly the requested number of chapters. Do not write prose, \
-only beats."""
+oversized multi-chapter word count. Propose exactly the requested number of chapters. Vary ending_style \
+across chapters deliberately rather than leaving every one on the default hook -- a book where every \
+single chapter ends on a cliffhanger reads as monotonous, not tense. Do not write prose, only beats."""
+
+OUTLINE_BRANCH_SYSTEM = """You are a novel outliner exploring multiple distinct possible next chapters, \
+not committing to one yet. Given the story so far, propose the requested number of options for the \
+SINGLE next chapter -- the options must be meaningfully different from each other (vary POV choice, \
+which open thread or structural beat it advances, tone, and ending style), not trivial rewordings of \
+the same idea. Each option must independently make sense as a real next chapter on its own. Return JSON:
+{"options": [{"id": "<short-slug, unique>", "title": "<...>", "pov": "<character name>", "beats": [<beat objects, see below>], "structural_beat": "<id from the beat-sheet given, or empty>", "ending_style": "<optional free-text override>", "word_target": <int>}]}
+""" + BEAT_DEPENDENCY_SCHEMA_NOTE + """
+pov MUST be one of the existing characters listed, unless none exist yet, in which case invent one \
+consistent with the premise. Do not write prose, only beats."""
 
 BOOK_PLAN_SYSTEM = """You are a novel outliner planning the REST of a book's chapter structure in one \
 pass -- not just the next few chapters, everything from here to the ending. This is the single most \
@@ -243,12 +289,14 @@ Rules:
 - Not every chapter needs a plant. A plant without a genuine gap before its payoff isn't worth tracking.
 
 Return JSON:
-{"chapters": [{"id": "<new, unique short-slug id, not colliding with existing ids>", "title": "...", "pov": "<character name>", "structural_beat": "<id from the beat-sheet, or empty>", "beats": [<beat objects, see below>], "plants": [{"description": "<a setup/promise this chapter plants>", "payoff_chapter": "<a LATER chapter id -- existing or newly added here -- that pays this off>"}], "word_target": <int>}]}
+{"chapters": [{"id": "<new, unique short-slug id, not colliding with existing ids>", "title": "...", "pov": "<character name>", "structural_beat": "<id from the beat-sheet, or empty>", "ending_style": "<optional: free-text override of how THIS chapter ends, else empty for the book's default hook rule>", "beats": [<beat objects, see below>], "plants": [{"description": "<a setup/promise this chapter plants>", "payoff_chapter": "<a LATER chapter id -- existing or newly added here -- that pays this off>"}], "word_target": <int>}]}
 """ + BEAT_DEPENDENCY_SCHEMA_NOTE + """
 Since you can see every chapter you're adding at once, use establishes/requires deliberately across \
 them: if chapter 5 introduces a character, mark it there with "establishes", and if an earlier \
 chapter's beat actually needs that same character to already exist, that's a bug in your own plan -- \
-fix the ordering before returning it, don't just declare a "requires" that comes before its "establishes".
+fix the ordering before returning it, don't just declare a "requires" that comes before its "establishes". \
+Vary ending_style across chapters deliberately -- with the whole remaining arc visible at once, this is \
+the best chance to make sure not every chapter lands the same way.
 pov must be one of the existing characters, unless none exist yet, in which case invent a cast \
 consistent with the premise. Do not write prose, only structure."""
 
@@ -275,6 +323,23 @@ Return JSON: {"segments": [{"speaker": "narrator"|"<character name>", "text": ".
 TITLE_SYSTEM = """You write a short, evocative title for a novel given its premise, genre, and focus \
 tags/themes. Output only the title itself -- no quotes, no subtitle unless it truly earns one, no \
 commentary, no alternatives."""
+
+SWERVE_SYSTEM = """You are a story editor brought in specifically to break a plan that has gotten too \
+predictable. Given the story bible and, when available, harness-computed structural material \
+(unresolved negative relationships that could reignite, or pairs of characters with NO relationship \
+to each other yet), propose ONE genuine narrative complication -- a betrayal, a reveal, an arrival, a \
+reversal -- that is NOT a logical continuation of what's already set up. When structural material is \
+given, prefer building the swerve from it (reignite a named tension, or stage a first collision \
+between a named unconnected pair) rather than inventing from nothing -- that material is the actual \
+structural opportunity; your job is to narrate what it could mean, not to ignore it for something \
+easier. It should feel like a real swerve: something a reader (and the author) wouldn't see coming \
+from the currently open threads alone, while still being plantable without contradicting anything \
+already established. Return JSON:
+{"id": "<short-slug>", "description": "<the complication itself, one or two sentences>",
+ "rationale": "<why this counts as a genuine swerve, not just the next expected beat>",
+ "touches": ["<character or thread names this would affect>"],
+ "built_from": "<which piece of structural material this used, if any, else empty>"}
+Do not propose something that merely accelerates an existing thread -- that is not a swerve."""
 
 CHARACTER_SHEET_SYSTEM = """You generate a character sheet for a novel, grounded in its premise, genre, \
 and focus tags/themes. Return JSON:
@@ -322,8 +387,9 @@ written make that the obvious next beat. Match the established voice exactly. Ou
 continuation text, nothing else.""" + TENSION_DISCIPLINE_NOTE + PACING_AND_RESTRAINT_NOTE)
 
 
-def build_draft_system(state: ProjectState) -> str:
-    system = DRAFT_SYSTEM_BASE + TENSION_DISCIPLINE_NOTE + PACING_AND_RESTRAINT_NOTE
+def build_draft_system(state: ProjectState, chapter: Optional[Chapter] = None) -> str:
+    base = DISCOVERY_DRAFT_SYSTEM_BASE if (chapter and chapter.mode == "discovery") else DRAFT_SYSTEM_BASE
+    system = base + TENSION_DISCIPLINE_NOTE + PACING_AND_RESTRAINT_NOTE
     if state.genre_beats:
         system += GENRE_AWARENESS_NOTE
     return system
@@ -344,7 +410,7 @@ def draft_chapter(
         progress(f"Drafting '{chapter.title}' (target ~{chapter.word_target} words)...")
     context = build_chapter_context(project, state, chapters, chapter)
     expected_chars = chapter.word_target * 5.5  # rough English chars/word average, for the ETA only
-    text = client.call(build_draft_system(state), context, max_tokens=8192, on_token=_token_reporter(progress, "Draft", expected_chars=expected_chars))
+    text = client.call(build_draft_system(state, chapter), context, max_tokens=8192, on_token=_token_reporter(progress, "Draft", expected_chars=expected_chars))
     if progress:
         progress(f"Draft done: {len(text.split())} words.")
     return text
@@ -496,6 +562,56 @@ def patch_missing_beats(
     return text
 
 
+RETRO_BEATS_SYSTEM = """You are given a finished chapter written in discovery mode -- no beat list was \
+planned in advance. List the beats it actually turned out to contain, in order, the way a reader would \
+describe what happens (3 to 8 short entries, one sentence each). This is a record of what the chapter \
+turned out to be, written after the fact for continuity tooling -- not a plan, and not a judgment of \
+whether it should have gone differently. Return JSON: {"beats": ["<beat 1>", "<beat 2>", ...]}"""
+
+
+def extract_beats_retroactively(client: LLMClient, chapter_text: str, progress: Optional[Progress] = None) -> List[str]:
+    """The discovery-mode complement to check_beat_coverage: instead of checking a draft against a
+    pre-authored plan, this DERIVES a beat list from a draft that had none, purely so downstream
+    consumers that expect chapter.beats to exist (outline-show, the dependency graph, a human
+    skimming the outline) still have something to read. Never fed back in as a constraint on the
+    text that produced it."""
+    if progress:
+        progress("Discovery mode: deriving a beat list from the finished chapter (for the record, not a plan)...")
+    result = client.call_json(RETRO_BEATS_SYSTEM, chapter_text)
+    beats = [b for b in result.get("beats", []) if isinstance(b, str) and b.strip()]
+    if progress:
+        progress(f"Retroactive beats: {len(beats)} recorded.")
+    return beats
+
+
+SHARPEN_SYSTEM = """You are a line editor whose ONLY job is hunting down the safest, most predictable, \
+most cliché choices in an otherwise-finished chapter draft and replacing them with something sharper \
+and more specific to THIS character and THIS scene. Look for: a stock phrase, a generic physical \
+reaction to emotion (heart pounding, breath catching, stomach dropping), a line of dialogue that says \
+exactly what it means with no subtext, a description vague enough to describe anyone or anywhere, a \
+character reaction so expected it could be swapped into any other scene without changing.
+
+Do NOT fix structural issues (pacing, beat coverage, continuity -- separate passes already handled \
+those). Do NOT change plot events, length, POV, or anything that already reads as specific and earned. \
+If the chapter is already sharp and particular throughout, make NO changes at all -- do not invent \
+problems to fill a quota; most chapters that reach this pass after revision will need only a few small \
+changes, some none. Output only the final chapter text, no commentary."""
+
+
+def sharpen_chapter(client: LLMClient, chapter_text: str, progress: Optional[Progress] = None) -> str:
+    """A deliberate counterweight to the critique/revise loop, which only ever pulls a draft toward
+    spec compliance (beat coverage, hook rule, pacing) and never pushes it past what's safe -- every
+    revision pass before this one is corrective, not additive, so a model's single riskiest or most
+    particular sentence is exactly as likely to get smoothed into blandness as its worst one. This
+    runs last, after structural revision is done, and touches only word-level specificity."""
+    if progress:
+        progress("Sharpening: hunting for safe/generic phrasing to replace...")
+    text = client.call(SHARPEN_SYSTEM, chapter_text, max_tokens=8192, on_token=_token_reporter(progress, "Sharpen"))
+    if progress:
+        progress(f"Sharpen done: {len(text.split())} words.")
+    return text
+
+
 def check_pov_consistency(
     client: LLMClient, state: ProjectState, chapter: Chapter, chapter_text: str, progress: Optional[Progress] = None
 ) -> List[ContinuityFlag]:
@@ -549,6 +665,10 @@ def extract_and_update_state(
             m.id: f"{m.subject} re: {m.about} -- {m.event}"
             for m in state.memories.values() if m.status == "active"
         },
+        "active_relationships": {
+            r.id: f"{r.a} & {r.b}: {r.kind} ({r.polarity})" for r in state.relationships.values() if r.status == "active"
+        },
+        "existing_motifs": [m.phrase for m in state.motifs.values()],
     }
     result = client.call_json(EXTRACT_SYSTEM, f"Bible:\n{bible_json}\n\nChapter:\n{chapter_text}")
 
@@ -605,6 +725,37 @@ def extract_and_update_state(
         if mid in state.memories:
             state.memories[mid].status = "resolved"
 
+    for r in result.get("new_relationships", []):
+        rid = r.get("id")
+        if rid and rid not in state.relationships:
+            state.relationships[rid] = Relationship(
+                id=rid, a=r.get("a", ""), b=r.get("b", ""), kind=r.get("kind", ""),
+                polarity=r.get("polarity") or "neutral", reason=r.get("reason", ""),
+                chapter_id=chapter_id, origin="auto",
+            )
+
+    for r in result.get("relationships_changed", []):
+        rid = r.get("id")
+        if rid in state.relationships:
+            if r.get("polarity"):
+                state.relationships[rid].polarity = r["polarity"]
+            if r.get("status"):
+                state.relationships[rid].status = r["status"]
+
+    existing_candidate_ids = {c.get("id") for c in state.motif_candidates}
+    existing_motif_phrases = {m.phrase.strip().lower() for m in state.motifs.values()}
+    for cand in result.get("motif_candidates", []):
+        phrase = (cand.get("phrase") or "").strip()
+        if not phrase or phrase.lower() in existing_motif_phrases:
+            continue
+        cid = _slugify(phrase, fallback="motif-candidate")
+        if cid in existing_candidate_ids:
+            continue
+        state.motif_candidates.append({
+            "id": cid, "phrase": phrase, "notes": cand.get("notes", ""), "chapter_id": chapter_id,
+        })
+        existing_candidate_ids.add(cid)
+
     summary_addition = result.get("chapter_summary", "")
     if summary_addition:
         state.running_summary = (state.running_summary + "\n" + summary_addition).strip()
@@ -613,7 +764,9 @@ def extract_and_update_state(
         progress(
             f"Extraction done: {len(result.get('new_promises', []))} new promise(s), "
             f"{len(result.get('promises_paid', []))} paid off, "
-            f"{len(result.get('new_memories', []))} new memory(ies)."
+            f"{len(result.get('new_memories', []))} new memory(ies), "
+            f"{len(result.get('new_relationships', []))} new relationship(s), "
+            f"{len(result.get('motif_candidates', []))} motif candidate(s)."
         )
     return state
 
@@ -670,9 +823,10 @@ def maybe_compress_summary(
     return state
 
 
-def plan_outline(client: LLMClient, state: ProjectState, chapters: List[Chapter], count: int = 3) -> List[dict]:
-    """Propose the next `count` chapters as beats (not prose). Returned as plain dicts for the
-    caller to review/edit before committing -- never merged into the outline automatically."""
+def _outline_brief(state: ProjectState, chapters: List[Chapter]) -> str:
+    """The context block shared by plan_outline and propose_outline_branches -- everything either
+    prompt needs to know about where the story currently stands, minus the closing instruction
+    line, which each caller appends itself."""
     used_beat_ids = {c.structural_beat for c in chapters if c.structural_beat}
     remaining_beats = [b for b in state.genre_beats if b.get("id") not in used_beat_ids]
     existing_characters = [
@@ -687,7 +841,7 @@ def plan_outline(client: LLMClient, state: ProjectState, chapters: List[Chapter]
     ]
     last_block = "\n".join(f"- {c.title}: {'; '.join(beat_text(b) for b in c.beats)}" for c in chapters[-2:]) or "(none yet -- this is the opening)"
 
-    brief = f"""Premise: {state.premise}
+    return f"""Premise: {state.premise}
 Genre: {state.genre_id or 'unspecified'} (pacing notes: {state.chapter_hook_rule or 'none given'})
 Remaining structural beats: {json.dumps(remaining_beats, indent=2)}
 
@@ -699,11 +853,135 @@ Open plot threads: {open_threads or '(none)'}
 Open promises: {open_promises or '(none)'}
 
 Most recent chapters:
-{last_block}
+{last_block}"""
 
-Propose the next {count} chapter(s)."""
+
+def plan_outline(client: LLMClient, state: ProjectState, chapters: List[Chapter], count: int = 3) -> List[dict]:
+    """Propose the next `count` chapters as beats (not prose). Returned as plain dicts for the
+    caller to review/edit before committing -- never merged into the outline automatically."""
+    brief = _outline_brief(state, chapters) + f"\n\nPropose the next {count} chapter(s)."
     result = client.call_json(OUTLINE_PLAN_SYSTEM, brief, max_tokens=3000)
     return result.get("chapters", [])
+
+
+def propose_outline_branches(client: LLMClient, state: ProjectState, chapters: List[Chapter], n: int = 3) -> List[dict]:
+    """The "get_actions" half of search_outline_continuations' reimplemented World Model/Search
+    Config pattern (see that function's docstring): `n` meaningfully DIFFERENT single-chapter
+    options for what comes next, in one call, rather than n repeated calls to plan_outline (whose
+    underlying call_json is deterministic at temperature=0 -- repeating it would just return the
+    same chapter n times, giving a search no actual branches to compare)."""
+    brief = _outline_brief(state, chapters) + f"\n\nPropose {n} distinct options for the next chapter."
+    result = client.call_json(OUTLINE_BRANCH_SYSTEM, brief, max_tokens=4000)
+    return result.get("options", [])[:n]
+
+
+def _dict_to_chapter(d: dict) -> Chapter:
+    """A proposed-but-not-committed chapter dict (from plan_outline/propose_outline_branches),
+    rehydrated just enough to run the pure-Python checks (check_dependencies,
+    check_relationship_tensions) against a HYPOTHETICAL outline that doesn't exist on disk yet."""
+    return Chapter(
+        id=d.get("id") or "?", title=d.get("title", ""), pov=d.get("pov", ""),
+        beats=d.get("beats", []), structural_beat=d.get("structural_beat") or None,
+        ending_style=d.get("ending_style") or None,
+    )
+
+
+def _score_branch_step(state: ProjectState, chapters_so_far: List[Chapter], candidate: dict) -> Tuple[float, dict]:
+    """The reward function for search_outline_continuations -- pure Python, no model call, exactly
+    the kind of cheap/checkable signal tree search over LLM outputs actually needs (see that
+    function's docstring for why this is the one place in the pipeline where a search algorithm
+    fits at all). Necessarily narrow: at plan time there's no prose yet, so this can only judge
+    structural health (does it introduce a dependency violation, does it claim ground already
+    covered, does it move an overdue promise), never narrative interest or prose quality -- a
+    high-scoring branch is a structurally sound one, not necessarily the most interesting one."""
+    hypothetical_chapter = _dict_to_chapter(candidate)
+    hypothetical_chapters = chapters_so_far + [hypothetical_chapter]
+    breakdown: Dict[str, float] = {}
+
+    dep_penalty = -1.0 * len(check_dependencies(state, hypothetical_chapters))
+    breakdown["dependency_penalty"] = dep_penalty
+
+    # An unresolved-relationship-tension flag isn't a bug here -- see check_relationship_tensions'
+    # own docstring -- it's the harness noticing combustible material is in play, which is exactly
+    # what a structurally interesting next chapter should be doing something with. Rewarded, not
+    # penalized, unlike a dependency violation.
+    breakdown["relationship_tension_bonus"] = 0.5 * len(check_relationship_tensions(state, hypothetical_chapters))
+
+    breakdown["new_structural_beat"] = 0.0
+    if candidate.get("structural_beat"):
+        used = {c.structural_beat for c in chapters_so_far if c.structural_beat}
+        if candidate["structural_beat"] not in used:
+            breakdown["new_structural_beat"] = 1.0
+
+    beats_joined = "\n".join(beat_text(b) for b in hypothetical_chapter.beats)
+    breakdown["promise_progress"] = 0.0
+    for p in state.promises.values():
+        if p.status in ("planted", "reinforced") and beats_joined and _mentioned([p.description], beats_joined):
+            breakdown["promise_progress"] += 0.5
+
+    return sum(breakdown.values()), breakdown
+
+
+@dataclass
+class OutlineBranch:
+    """One candidate continuation explored by search_outline_continuations -- a sequence of
+    proposed (not committed) chapter dicts plus the cumulative reward that got it there. This is a
+    from-scratch reimplementation of llm-reasoners' State/reward concept (see AGENTS.md and
+    README.md for why: that library's actual search algorithms assume a local torch/transformers
+    model-serving stack this project doesn't use), scoped to the one place in this pipeline where
+    the pattern's assumptions -- cheap-to-generate states, cheap-to-check reward -- actually hold:
+    outline branching, not prose drafting."""
+    chapters: List[dict]
+    score: float
+    reward_breakdown: List[dict]
+
+
+def search_outline_continuations(
+    client: LLMClient, state: ProjectState, chapters: List[Chapter],
+    depth: int = 3, branching: int = 3, beam_width: int = 3, progress: Optional[Progress] = None,
+) -> List[OutlineBranch]:
+    """Beam search over candidate outline continuations. Native reimplementation of the World
+    Model / Search Config / Search Algorithm pattern from maitrix-org/llm-reasoners: `state` is a
+    hypothetical outline-so-far, the "action space" is propose_outline_branches' distinct options
+    for the next chapter (the World Model's cheap state-generation step -- a beat-sheet call, not
+    a drafted chapter), and the reward is _score_branch_step's pure-Python bible checks (the
+    Search Config, standing in for that library's log-likelihood/goal-check scoring). Beam search
+    was picked over MCTS/DFS because the branching factor and depth here are both small and the
+    reward is cheap and exact -- there's no need for MCTS's rollout/backpropagation machinery when
+    every node can just be scored directly.
+
+    Nothing is committed: returns the top `beam_width` branches, `depth` chapters deep, sorted
+    best-first. The caller reviews (agent_wrapper.outline_search) and, to actually use one, saves
+    its `chapters` as the pending outline proposal (agent_wrapper.outline_search_select) -- from
+    there the normal outline-commit-proposal review/commit flow applies unchanged.
+
+    Cost: depth * beam_width calls in the worst case (each producing `branching` cheap JSON
+    options, not prose) -- e.g. the defaults (3, 3, 3) cost at most 1 + 3 + 3 = 7 calls total,
+    since the first step only has one beam to expand."""
+    beams: List[OutlineBranch] = [OutlineBranch(chapters=[], score=0.0, reward_breakdown=[])]
+    for step in range(depth):
+        if progress:
+            progress(f"Outline search: depth {step + 1}/{depth}, expanding {len(beams)} branch(es)...")
+        candidates: List[OutlineBranch] = []
+        for branch in beams:
+            hypothetical_chapters = chapters + [_dict_to_chapter(c) for c in branch.chapters]
+            options = propose_outline_branches(client, state, hypothetical_chapters, n=branching)
+            for opt in options:
+                delta, breakdown = _score_branch_step(state, hypothetical_chapters, opt)
+                candidates.append(OutlineBranch(
+                    chapters=branch.chapters + [opt],
+                    score=branch.score + delta,
+                    reward_breakdown=branch.reward_breakdown + [breakdown],
+                ))
+        if not candidates:
+            break
+        candidates.sort(key=lambda b: b.score, reverse=True)
+        beams = candidates[:beam_width]
+    beams.sort(key=lambda b: b.score, reverse=True)
+    if progress:
+        best = f"{beams[0].score:.1f}" if beams else "n/a"
+        progress(f"Outline search done: {len(beams)} branch(es) kept, best score {best}.")
+    return beams
 
 
 def min_chapters_for_remaining_beats(state: ProjectState, chapters: List[Chapter]) -> int:
@@ -916,6 +1194,52 @@ def generate_voice_profile(client: LLMClient, project: Project, chapters: List[C
     return client.call(VOICE_PROFILE_SYSTEM, brief, max_tokens=512, temperature=0.7)
 
 
+def _swerve_structural_material(state: ProjectState) -> dict:
+    """Computes the two kinds of harness-side "mutation" seed described in SWERVE_SYSTEM's own
+    docstring: (1) unresolved negative Relationships (see models.py) -- named tension that already
+    exists and could be reignited -- and (2) pairs of characters with NO Relationship entry between
+    them at all, i.e. two nodes that have never been connected. Both are pure-Python, deterministic
+    computations over the bible's own data -- the model is handed concrete structural options
+    instead of being asked to invent a complication from an unconstrained blank page."""
+    unresolved = [
+        f"{r.a} & {r.b}: {r.kind} ({r.reason})" if r.reason else f"{r.a} & {r.b}: {r.kind}"
+        for r in state.relationships.values() if r.status == "active" and r.polarity == "negative"
+    ]
+    connected_pairs = {frozenset((r.a, r.b)) for r in state.relationships.values()}
+    names = list(state.characters.keys())
+    all_pairs = [frozenset(p) for p in itertools.combinations(names, 2)]
+    unconnected = [tuple(sorted(p)) for p in all_pairs if p not in connected_pairs]
+    random.shuffle(unconnected)
+    return {
+        "unresolved_tensions": unresolved[:5],
+        "never_connected_pairs": [f"{a} & {b}" for a, b in unconnected[:5]],
+    }
+
+
+def propose_swerve(client: LLMClient, state: ProjectState) -> dict:
+    """Does NOT write to the bible -- like generate_character_sheet/generate_title, this is a
+    suggestion for a human/agent to review and add via update_bible (a new plot_thread, typically)
+    if it's worth pursuing. See SWERVE_SYSTEM and _swerve_structural_material for the design: the
+    harness computes concrete structural opportunities (an unresolved feud, a never-connected pair)
+    and hands them to the model as preferred raw material, rather than asking it to invent a
+    complication in a vacuum."""
+    material = _swerve_structural_material(state)
+    open_threads = [f"[{t.id}] {t.description}" for t in state.plot_threads.values() if t.status == "open"]
+    characters = [f"{c.name}: {c.description} (status: {c.status or 'unspecified'})" for c in state.characters.values()]
+    brief = (
+        f"Premise: {state.premise}\n\nCharacters:\n" + ("\n".join(characters) or "(none)") +
+        "\n\nOpen threads:\n" + ("\n".join(open_threads) or "(none)") +
+        "\n\nUnresolved negative relationships (prefer reigniting one of these):\n" +
+        ("\n".join(material["unresolved_tensions"]) or "(none)") +
+        "\n\nCharacter pairs with no relationship to each other yet (prefer staging a first collision between one of these if no tension above fits):\n" +
+        ("\n".join(material["never_connected_pairs"]) or "(none)") +
+        f"\n\nStory so far:\n{state.running_summary or '(this is the opening -- no chapters written yet)'}"
+    )
+    result = client.call_json(SWERVE_SYSTEM, brief)
+    result["structural_material"] = material
+    return result
+
+
 def generate_chapter(
     client: LLMClient,
     project: Project,
@@ -928,6 +1252,7 @@ def generate_chapter(
     patch_missing: bool = True,
     pov_check: bool = True,
     tension_check: bool = True,
+    sharpen: bool = True,
     progress: Optional[Progress] = None,
 ) -> Chapter:
     state = project.load_state()
@@ -985,7 +1310,25 @@ def generate_chapter(
     chapter.file = project.chapter_text_path(chapter.id)
     project.update_chapter(chapter)
 
-    if beat_check:
+    if sharpen:
+        # Runs after structural revision, before any of the checks below -- a deliberate
+        # counterweight pass (see sharpen_chapter's docstring), touching only word-level
+        # specificity, never structure -- beat coverage below still checks the sharpened text.
+        sharpened, error = _safe_stage("Sharpen pass", sharpen_chapter, client, text, progress=progress)
+        if sharpened is not None:
+            text = sharpened
+            project.save_chapter_text(chapter.id, text)
+
+    if chapter.mode == "discovery":
+        # No pre-authored beat list to check coverage against -- derive one from the finished
+        # chapter instead, purely for downstream display/dependency-graph consumers. See
+        # extract_beats_retroactively's docstring; never fed back as a constraint on this text.
+        if beat_check:
+            retro_beats, _ = _safe_stage("Retroactive beat extraction", extract_beats_retroactively, client, text, progress=progress)
+            if retro_beats:
+                chapter.beats = retro_beats
+                project.update_chapter(chapter)
+    elif beat_check:
         coverage, error = _safe_stage("Beat-coverage check", check_beat_coverage, client, chapter, text, progress=progress)
         if coverage is not None:
             missing = [c["beat"] for c in coverage if c.get("status") == "missing"]
@@ -1067,6 +1410,12 @@ def generate_chapter(
             if progress:
                 progress(f"Dependency check: {len(dependency_flags)} out-of-order reference(s) flagged.")
 
+        relationship_flags = check_relationship_tensions(state, chapters)
+        if relationship_flags:
+            project.add_continuity_flags(relationship_flags)
+            if progress:
+                progress(f"Relationship check: {len(relationship_flags)} unresolved tension(s) flagged.")
+
         state, _ = _safe_stage("Summary compression", maybe_compress_summary, client, state, progress=progress)
         if state is None:
             state = new_state  # compression failed -- keep the pre-compression (still valid) state
@@ -1139,6 +1488,10 @@ def continue_and_extract(
         dependency_flags = check_dependencies(state, chapters)
         if dependency_flags:
             project.add_continuity_flags(dependency_flags)
+
+        relationship_flags = check_relationship_tensions(state, chapters)
+        if relationship_flags:
+            project.add_continuity_flags(relationship_flags)
 
         project.save_state(state)
 

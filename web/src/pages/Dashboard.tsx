@@ -1,7 +1,10 @@
 import { useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
-import { getSnapshot, removeEntity, resolveMemory, updateBible } from '../api'
-import type { Memory, Motif, Snapshot } from '../types'
+import {
+  dismissMotifCandidate, getSnapshot, promoteMotifCandidate, removeEntity, resolveMemory,
+  resolveRelationship, updateBible,
+} from '../api'
+import type { Memory, Motif, Relationship, Snapshot } from '../types'
 
 export function Dashboard() {
   const { projectId } = useParams<{ projectId: string }>()
@@ -16,6 +19,11 @@ export function Dashboard() {
   const [newMemAbout, setNewMemAbout] = useState('')
   const [newMemEvent, setNewMemEvent] = useState('')
   const [newMemEffect, setNewMemEffect] = useState('')
+  const [newRelA, setNewRelA] = useState('')
+  const [newRelB, setNewRelB] = useState('')
+  const [newRelKind, setNewRelKind] = useState('')
+  const [newRelPolarity, setNewRelPolarity] = useState('neutral')
+  const [newRelReason, setNewRelReason] = useState('')
 
   const load = () => {
     if (!projectId) return
@@ -92,11 +100,51 @@ export function Dashboard() {
     load()
   }
 
+  const addRelationship = async () => {
+    if (!projectId || !newRelA.trim() || !newRelB.trim() || !newRelKind.trim()) return
+    const id = `rel-${Date.now().toString(36)}`
+    await updateBible(projectId, {
+      relationships: [{ id, a: newRelA, b: newRelB, kind: newRelKind, polarity: newRelPolarity, reason: newRelReason }],
+    })
+    setNewRelA('')
+    setNewRelB('')
+    setNewRelKind('')
+    setNewRelPolarity('neutral')
+    setNewRelReason('')
+    load()
+  }
+
+  const removeRelationship = async (id: string) => {
+    if (!projectId) return
+    await removeEntity(projectId, 'relationship', id)
+    load()
+  }
+
+  const markRelationshipResolved = async (id: string) => {
+    if (!projectId) return
+    await resolveRelationship(projectId, id)
+    load()
+  }
+
+  const promoteCandidate = async (id: string) => {
+    if (!projectId) return
+    await promoteMotifCandidate(projectId, id)
+    load()
+  }
+
+  const dismissCandidate = async (id: string) => {
+    if (!projectId) return
+    await dismissMotifCandidate(projectId, id)
+    load()
+  }
+
   if (!snapshot) return <p>Loading…</p>
   const { state, outline, continuity } = snapshot
   const openFlags = continuity.filter((f) => !f.resolved).length
   const motifs = Object.values(state.motifs) as Motif[]
   const memories = Object.values(state.memories) as Memory[]
+  const relationships = Object.values(state.relationships) as Relationship[]
+  const motifCandidates = state.motif_candidates
   const characterNames = Object.keys(state.characters)
 
   return (
@@ -172,6 +220,23 @@ export function Dashboard() {
         </button>
       </div>
 
+      {motifCandidates.length > 0 && (
+        <>
+          <h3>Pending motif candidates</h3>
+          <p className="hint">Flagged by the model during extraction as recurrence-worthy -- review and promote or dismiss.</p>
+          <ul className="motif-list">
+            {motifCandidates.map((c) => (
+              <li key={c.id}>
+                <strong>&ldquo;{c.phrase}&rdquo;</strong>
+                {c.notes && <span className="motif-notes"> — {c.notes}</span>}
+                <button onClick={() => promoteCandidate(c.id)}>Promote</button>
+                <button className="danger" onClick={() => dismissCandidate(c.id)}>Dismiss</button>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+
       <h2>Memories</h2>
       <p className="hint">
         The Telltale-games mechanic ("X will remember that") -- a specific past incident that keeps
@@ -228,6 +293,44 @@ export function Dashboard() {
         />
         <button onClick={addMemory} disabled={!newMemSubject.trim() || !newMemEvent.trim() || !newMemEffect.trim()}>
           Add memory
+        </button>
+      </div>
+
+      <h2>Relationships</h2>
+      <p className="hint">
+        Standing relational facts ("X knows Y", "Z and Y hate each other from a fight") -- pinned
+        into context deterministically whenever both sides are relevant, so the model is always
+        told rather than trusted to remember. Feeds "Propose a swerve" in the Plan drawer too.
+      </p>
+      <ul className="motif-list">
+        {relationships.map((r) => (
+          <li key={r.id} className={r.status === 'resolved' ? 'resolved' : ''}>
+            <strong>{r.a} & {r.b}</strong>
+            <span className="motif-notes"> — {r.kind} ({r.polarity}){r.reason && `: ${r.reason}`}</span>
+            <span className="chip">{r.status}</span>
+            {r.status === 'active' && (
+              <button onClick={() => markRelationshipResolved(r.id)}>Mark resolved</button>
+            )}
+            <button className="danger" onClick={() => removeRelationship(r.id)}>
+              Remove
+            </button>
+          </li>
+        ))}
+        {relationships.length === 0 && <p>No relationships yet.</p>}
+      </ul>
+      <div className="new-project">
+        <input placeholder="A (character/entity name)" list="character-names" value={newRelA} onChange={(e) => setNewRelA(e.target.value)} />
+        <input placeholder="B (the other character/entity)" list="character-names" value={newRelB} onChange={(e) => setNewRelB(e.target.value)} />
+        <input placeholder="Kind: rivals, married, acquainted, ..." value={newRelKind} onChange={(e) => setNewRelKind(e.target.value)} />
+        <select value={newRelPolarity} onChange={(e) => setNewRelPolarity(e.target.value)}>
+          <option value="positive">positive</option>
+          <option value="negative">negative</option>
+          <option value="neutral">neutral</option>
+          <option value="complicated">complicated</option>
+        </select>
+        <input placeholder="Reason, e.g. 'a fight over the inheritance' (optional)" value={newRelReason} onChange={(e) => setNewRelReason(e.target.value)} />
+        <button onClick={addRelationship} disabled={!newRelA.trim() || !newRelB.trim() || !newRelKind.trim()}>
+          Add relationship
         </button>
       </div>
 

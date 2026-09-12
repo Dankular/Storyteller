@@ -24,10 +24,10 @@ from typing import Any, Callable
 
 from .depgraph import build_dependency_graph, check_dependencies
 from .llm import DEFAULT_MODEL, LLMClient
-from .models import Character, Chapter, Location, Memory, Motif, PlotThread, Promise
+from .models import Character, Chapter, Location, Memory, Motif, PlotThread, Promise, Relationship
 from .pipeline import (
     apply_genre, audit_manuscript, continue_and_extract, generate_chapter, generate_character_sheet,
-    generate_title, plan_book, plan_outline,
+    generate_title, plan_book, plan_outline, propose_swerve, search_outline_continuations,
 )
 from .storage import Project
 
@@ -122,6 +122,11 @@ class AgentSession:
             if not mid:
                 raise ValueError(f"memory update requires 'id': {value!r}")
             state.memories[mid] = _merge_into(state.memories.get(mid), Memory, value)
+        for value in data.get("relationships", []):
+            rid = value.get("id")
+            if not rid:
+                raise ValueError(f"relationship update requires 'id': {value!r}")
+            state.relationships[rid] = _merge_into(state.relationships.get(rid), Relationship, value)
         self.project.save_state(state)
         return self.snapshot()
 
@@ -143,13 +148,14 @@ class AgentSession:
             "promise": self.project.remove_promise,
             "motif": self.project.remove_motif,
             "memory": self.project.remove_memory,
+            "relationship": self.project.remove_relationship,
         }
         if kind == "chapter":
             removed = self.project.remove_chapter(id, force=force)
         elif kind in removers:
             removed = removers[kind](id)
         else:
-            raise ValueError(f"Unknown kind '{kind}' (expected character|location|plot_thread|promise|motif|memory|chapter)")
+            raise ValueError(f"Unknown kind '{kind}' (expected character|location|plot_thread|promise|motif|memory|relationship|chapter)")
         return {"removed_kind": kind, "removed": asdict(removed), "snapshot": self.snapshot()}
 
     def rename(self, kind: str, old_id: str, new_id: str) -> dict:
@@ -160,9 +166,10 @@ class AgentSession:
             "promise": self.project.rename_promise,
             "motif": self.project.rename_motif,
             "memory": self.project.rename_memory,
+            "relationship": self.project.rename_relationship,
         }
         if kind not in renamers:
-            raise ValueError(f"Unknown kind '{kind}' (expected character|location|plot_thread|promise|motif|memory)")
+            raise ValueError(f"Unknown kind '{kind}' (expected character|location|plot_thread|promise|motif|memory|relationship)")
         renamed = renamers[kind](old_id, new_id)
         return {"renamed_kind": kind, "renamed": asdict(renamed), "snapshot": self.snapshot()}
 
@@ -173,6 +180,41 @@ class AgentSession:
     def memory_resolve(self, memory_id: str) -> dict:
         memory = self.project.resolve_memory(memory_id)
         return {"memory": asdict(memory)}
+
+    def relationship_resolve(self, relationship_id: str) -> dict:
+        rel = self.project.resolve_relationship(relationship_id)
+        return {"relationship": asdict(rel)}
+
+    def motif_candidate_promote(self, candidate_id: str, motif_id: str | None = None, notes: str | None = None) -> dict:
+        motif = self.project.promote_motif_candidate(candidate_id, motif_id, notes)
+        return {"motif": asdict(motif), "snapshot": self.snapshot()}
+
+    def motif_candidate_dismiss(self, candidate_id: str) -> dict:
+        dismissed = self.project.dismiss_motif_candidate(candidate_id)
+        return {"dismissed": dismissed, "snapshot": self.snapshot()}
+
+    def swerve_propose(self) -> dict:
+        """Does not write to the bible -- review the result, then add it via update_bible
+        (typically as a new plot_thread) if it's worth pursuing. See pipeline.propose_swerve."""
+        return propose_swerve(LLMClient(model=self.model), self._state())
+
+    def outline_search(self, depth: int = 3, branching: int = 3, beam_width: int = 3) -> dict:
+        """Beam search over candidate outline continuations, scored by pure-Python bible checks --
+        see pipeline.search_outline_continuations. Nothing is committed; pick a branch from the
+        result and pass its `chapters` to outline_search_select to stage it for the normal
+        outline-commit-proposal review/commit flow."""
+        branches = search_outline_continuations(
+            LLMClient(model=self.model), self._state(), self.project.load_outline(),
+            depth=depth, branching=branching, beam_width=beam_width, progress=self.progress,
+        )
+        return {"branches": [asdict(b) for b in branches]}
+
+    def outline_search_select(self, chapters: list) -> dict:
+        """Saves one branch's `chapters` (from outline_search's result) as the pending outline
+        proposal -- the same shape `plan` produces, so the normal review/commit flow applies
+        unchanged. Does not itself commit anything."""
+        self.project.save_outline_proposal(chapters)
+        return {"proposal_type": "outline", "proposal": chapters, "commit_required": True}
 
     def continuity_resolve(self, index: int) -> dict:
         flag = self.project.resolve_continuity_flag(index)
@@ -253,7 +295,8 @@ class AgentSession:
             critique_rounds=int(options.get("critique_rounds", 2)),
             check=options.get("check", True), beat_check=options.get("beat_check", True),
             patch_missing=options.get("patch_missing", True), pov_check=options.get("pov_check", True),
-            tension_check=options.get("tension_check", True), progress=self.progress,
+            tension_check=options.get("tension_check", True), sharpen=options.get("sharpen", True),
+            progress=self.progress,
         )
         result = {"chapter": asdict(chapter), "text": self.project.load_chapter_text(chapter_id)}
         if options.get("narrate"):
@@ -305,9 +348,10 @@ class AgentSession:
 
 _ACTIONS = [
     "init", "snapshot", "update_bible", "add_chapters", "update_chapter", "remove", "rename",
-    "promise_resolve", "memory_resolve", "continuity_resolve", "voice_search", "voice_assign", "character_generate",
+    "promise_resolve", "memory_resolve", "relationship_resolve", "motif_candidate_promote",
+    "motif_candidate_dismiss", "continuity_resolve", "voice_search", "voice_assign", "character_generate",
     "title_generate", "dependency_graph", "dependency_check", "plan", "commit", "generate",
-    "continue_chapter", "audit",
+    "continue_chapter", "audit", "swerve_propose", "outline_search", "outline_search_select",
 ]
 
 
@@ -324,6 +368,10 @@ def _dispatch(session: AgentSession, action: str, payload: dict) -> dict:
     if action == "rename": return session.rename(payload["kind"], payload["old_id"], payload["new_id"])
     if action == "promise_resolve": return session.promise_resolve(payload["id"], payload["chapter_id"])
     if action == "memory_resolve": return session.memory_resolve(payload["id"])
+    if action == "relationship_resolve": return session.relationship_resolve(payload["id"])
+    if action == "motif_candidate_promote":
+        return session.motif_candidate_promote(payload["id"], payload.get("motif_id"), payload.get("notes"))
+    if action == "motif_candidate_dismiss": return session.motif_candidate_dismiss(payload["id"])
     if action == "continuity_resolve": return session.continuity_resolve(int(payload["index"]))
     if action == "voice_search":
         return session.voice_search(
@@ -340,6 +388,13 @@ def _dispatch(session: AgentSession, action: str, payload: dict) -> dict:
     if action == "generate": return session.generate(payload["chapter_id"], payload.get("options"))
     if action == "continue_chapter": return session.continue_chapter(payload["chapter_id"], payload.get("edited_text"))
     if action == "audit": return session.audit()
+    if action == "swerve_propose": return session.swerve_propose()
+    if action == "outline_search":
+        return session.outline_search(
+            depth=int(payload.get("depth", 3)), branching=int(payload.get("branching", 3)),
+            beam_width=int(payload.get("beam_width", 3)),
+        )
+    if action == "outline_search_select": return session.outline_search_select(payload["chapters"])
     raise ValueError(f"Unknown action '{action}'")
 
 

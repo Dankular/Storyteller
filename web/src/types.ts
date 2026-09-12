@@ -54,6 +54,30 @@ export interface Memory {
   origin: string // manual | auto
 }
 
+// A standing relational fact between two entities ("X knows Y", "Z and Y hate each other from a
+// fight") -- see models.py's Relationship docstring. Pinned into context deterministically
+// whenever both sides are relevant, instead of relying on the model to remember it.
+export interface Relationship {
+  id: string
+  a: string
+  b: string
+  kind: string
+  polarity: string // positive | negative | neutral | complicated
+  reason: string
+  chapter_id: string | null
+  status: string // active | resolved
+  origin: string // manual | auto
+}
+
+// A motif the model flagged during extraction as recurrence-worthy but not yet promoted into a
+// real Motif -- see models.py's ProjectState.motif_candidates docstring.
+export interface MotifCandidate {
+  id: string
+  phrase: string
+  notes: string
+  chapter_id: string | null
+}
+
 // A beat is either a plain string, or an object declaring authored dependencies -- see
 // models.py's Chapter.beats docstring.
 export type StructuredBeat = { text: string; requires?: string[]; establishes?: string[] }
@@ -79,6 +103,9 @@ export interface Chapter {
   file: string | null
   structural_beat: string | null
   frame_of: string | null // another chapter id this one is narrated from within, e.g. a flashback framed by a present-day chapter
+  ending_style: string | null // free-text override of ProjectState.chapter_hook_rule for this chapter only
+  mode: string // "outline" | "discovery" -- see `direction`
+  direction: string // used only when mode === "discovery": a loose direction instead of a beat checklist
 }
 
 export interface ContinuityFlag {
@@ -100,6 +127,8 @@ export interface ProjectState {
   promises: Record<string, Promise>
   motifs: Record<string, Motif>
   memories: Record<string, Memory>
+  relationships: Record<string, Relationship>
+  motif_candidates: MotifCandidate[]
   genre_id: string | null
   genre_beats: unknown[]
   tropes_embrace: string[]
@@ -145,6 +174,14 @@ export interface AffectedChapter {
   id: string
   title: string
   status: string
+}
+
+// One candidate continuation from a beam search over the outline -- see
+// pipeline.search_outline_continuations / OutlineBranch.
+export interface OutlineBranch {
+  chapters: Record<string, unknown>[]
+  score: number
+  reward_breakdown: Record<string, number>[]
 }
 
 export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed'

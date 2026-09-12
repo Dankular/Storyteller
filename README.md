@@ -130,6 +130,12 @@ explicit instruction that each recurrence should land with more weight than the 
 identically. `first_used_in` is optional and purely informational (set it by hand, or leave it
 blank for a motif planted before any chapter is drafted).
 
+Extraction can also flag a **motif candidate** after any chapter — something that felt striking and
+repeatable but isn't a real motif until a human/agent says so (unlike a promise or memory, this is
+an editorial choice, not a fact, so it's never auto-committed). Pending candidates show in
+`bible-show`/`motif-candidates-show`; `motif-candidate-promote <id>` turns one into a real motif,
+`motif-candidate-dismiss <id>` discards it.
+
 ### Frame narratives
 
 A chapter can be tagged `--frame-of <chapter_id>` (`outline-add`, or `update_chapter`'s `frame_of`
@@ -158,6 +164,84 @@ given chapter. Extraction (`extract_and_update_state`) can auto-propose one afte
 something happens that should genuinely change how a character treats another; `memory-resolve`
 (or the web UI's "Mark resolved") marks it settled (a grudge forgiven, trust repaired) without
 deleting the record, at which point it stops being pinned into context.
+
+### Standing relationships ("X and Y hate each other from a fight")
+
+A `relationship` (`bible-add-relationship <id> <a> <b> <kind> [--polarity ...] [--reason ...]`) is
+a standing relational fact — "X knows Y", "Z and Y hate each other from a fight", "this won't work
+because of X" — deliberately kept off the model's plate: rather than trusting the model to remember
+a relationship from chapters back, `context.py`'s `_build_relationships_block` pins it into context
+deterministically every time BOTH sides are relevant, and `depgraph.check_relationship_tensions`
+(pure Python, no model call) flags a beat that brings together two parties with a known, unresolved
+**negative**-polarity relationship — not a contradiction detector (Python can't read prose for
+subtext), just a reminder the friction exists so it's never silently missed. Distinct from a
+`memory` (one-directional, event-derived: "X remembers Y did Z") and from a `plot_thread` (an
+ongoing story line, not a relational fact). Extraction can auto-propose one (`new_relationships`)
+or mark one changed/resolved (`relationships_changed`); `relationship-resolve` marks a feud ended or
+a bond mended by hand.
+
+### Per-chapter ending variety
+
+`ProjectState.chapter_hook_rule` (set by a genre profile, e.g. "end every chapter on a hook") used
+to apply uniformly to every chapter in the book — which means a book where every single chapter
+ends on a cliffhanger, by construction. `outline-add --ending-style "..."` (or `update_chapter`'s
+`ending_style` field) overrides it for just that one chapter — "end quietly, let this one breathe,"
+"cut away mid-sentence," "end on dark irony" — so formal variety across chapter endings is something
+the outline can express, not something the harness prevents. `plan`/`book-plan` are prompted to vary
+it deliberately across the chapters they propose rather than leaving every one on the default hook.
+
+### Discovery mode: drafting without a beat checklist
+
+A chapter's `mode` (`outline-add --mode discovery --direction "..."`) defaults to `"outline"` — the
+normal beat-by-beat pipeline, where deviating from the plan is something the critique/revise loop
+corrects back into line. Setting `mode: "discovery"` inverts that: the chapter is drafted from a
+loose one-or-two-sentence `direction` instead of a beat checklist, explicitly told it is *not*
+required to hit specific beats in a specific order and should follow the direction where the scene
+and characters actually lead. No coverage check runs against a plan that was never written; instead
+`beats` is populated **retroactively** from the finished chapter (`extract_beats_retroactively`),
+purely for downstream display and the dependency graph — a record of what the chapter turned out to
+be, never fed back as a constraint on the text that produced it. Everything else (motifs, memories,
+relationships, promises, continuity/POV/tension checks, extraction) works identically in either mode.
+
+### The sharpen pass
+
+`generate`'s critique/revise loop only ever pulls a draft *toward* spec compliance (beat coverage,
+the hook rule, pacing) — it has no mechanism that rewards a genuinely surprising or specific choice,
+so a model's single riskiest sentence is exactly as likely to get smoothed into blandness as its
+worst one. The sharpen pass (`pipeline.sharpen_chapter`, `options.sharpen`, on by default) runs
+last, after structural revision is done, with one job only: find the safest, most cliché phrasing
+left — a stock phrase, a generic "heart pounding" reaction, dialogue with no subtext — and replace
+it with something more specific to *this* character and *this* scene. It touches no structure, no
+plot, no length; a chapter that's already sharp throughout gets no changes at all.
+
+### Story-editor tools: swerve & outline search
+
+Two agent-facing tools built specifically to counter a plan that's gotten too predictable, and to
+"keep the logic off the model and on the harness" wherever the harness can compute something
+concrete instead of asking the model to invent from a blank page:
+
+- **`swerve-propose`** (`pipeline.propose_swerve`) asks for ONE genuine narrative complication that
+  is *not* a logical continuation of what's already set up. When available, it's handed
+  harness-computed structural material to build from: an unresolved negative `relationship` to
+  reignite, or a pair of characters with **no** relationship to each other at all yet — a
+  never-connected-nodes collision, computed by plain Python over the existing bible
+  (`_swerve_structural_material`), not invented by the model. Nothing is written to the bible;
+  review the result and add it yourself (typically as a `plot_thread`) if it's worth pursuing.
+- **`outline-search`** (`pipeline.search_outline_continuations`) is a beam search over candidate
+  outline continuations. This is a **native reimplementation** of the World Model / Search Config /
+  Search Algorithm pattern from
+  [`maitrix-org/llm-reasoners`](https://github.com/maitrix-org/llm-reasoners) — not a dependency on
+  that library, which hard-requires `torch`/`transformers`/`bitsandbytes`/`peft`/`fairscale` (a
+  local-model-serving research stack, per its `setup.py`) this project deliberately doesn't carry.
+  The pattern is scoped to the one place it actually fits: a "state" here is a cheap beat-sheet call
+  (`propose_outline_branches`, not a drafted chapter), and the reward
+  (`_score_branch_step`) is `check_dependencies`/`check_relationship_tensions`/promise-payoff/
+  beat-coverage — pure Python, exact, and cheap, unlike judging prose that doesn't exist yet at plan
+  time. That's also why beam search was picked over MCTS: with a small branching factor and an
+  exact, cheap reward, there's no need for MCTS's rollout/backpropagation machinery. Cost is at most
+  `depth * beam_width` JSON calls (defaults: at most 7, no prose generated). Nothing is committed —
+  pick a branch and it becomes the pending outline proposal, from which the normal
+  `outline-commit-proposal` review/commit flow applies unchanged.
 
 ### POV / voice persistence
 
@@ -297,7 +381,8 @@ and running summary accumulate automatically.
 The bible isn't append-only: `bible-remove-character`/`bible-rename-character` (renaming also
 updates any chapter's `--pov` that used the old name), `bible-remove-location`/
 `bible-rename-location`, `thread-remove`/`thread-rename`, `promise-remove`/`promise-rename`,
-`motif-remove`/`motif-rename`, `memory-remove`/`memory-rename`/`memory-resolve`, and
+`motif-remove`/`motif-rename`, `memory-remove`/`memory-rename`/`memory-resolve`,
+`relationship-remove`/`relationship-rename`/`relationship-resolve`, and
 `outline-remove <id> [--force]` (refuses to delete an already-drafted chapter's manuscript text
 unless forced) all exist for fixing a bible entry that turns out to be wrong or redundant.
 `continuity-resolve <index>` marks one flag from `continuity-show`'s output resolved (`<index>` is
@@ -341,9 +426,10 @@ has no shell to run the CLI in first) or add an existing project by path.
 a chapter's editor (the last one this browser had open, or the first in outline order, remembered
 per-project in `localStorage`), not a dashboard. A slim always-visible chapter rail on the left
 switches between chapters (and quick-adds a new one); everything else -- Characters, Story (premise/
-genre/tags/style/motifs/memories/summary), Plan, and Continuity -- opens as a drawer on the right
-via the header toggles, auxiliary to the manuscript rather than destinations you navigate away to.
-Only one drawer is open at a time, closed by default so the manuscript gets full width.
+genre/tags/style/motifs/memories/relationships/summary), Plan (which also hosts "Propose a swerve"
+and outline search), and Continuity -- opens as a drawer on the right via the header toggles,
+auxiliary to the manuscript rather than destinations you navigate away to. Only one drawer is open
+at a time, closed by default so the manuscript gets full width.
 
 Long-running operations (`generate`, `continue`, `plan`, `audit`) run as background jobs
 (`novel_harness/webapi/jobs.py`) so the browser doesn't block on a multi-minute chapter draft --
@@ -400,6 +486,18 @@ the dependency graph is shown as a list, not an interactive diagram, in this fir
   a chapter isn't explicitly tagged with `--structural-beat`; an explicit tag always
   wins, and unbounded books (`target_chapters = 0`) skip position-based guessing
   entirely.
+- **`outline-search`'s reward function only ever scores structural health, never narrative
+  interest or prose quality** — at plan time there's no prose yet, only a beat-sheet, so
+  `_score_branch_step` can check "does this introduce a dependency violation / claim an
+  unclaimed beat / advance an overdue promise" and nothing about whether the resulting chapter
+  would actually be any good to read. A high-scoring branch is a structurally sound one, not
+  necessarily the most interesting one — review the branches yourself before picking one, the
+  same way you'd review any other proposal.
+- **`swerve-propose`'s structural material is a lower bound on what's interesting, not an
+  exhaustive one** — it only surfaces relationships you've actually recorded and characters
+  that exist in the bible; a swerve worth having that depends on something never entered as a
+  `relationship` won't get the same harness-computed nudge (the model can still invent one from
+  the premise/threads alone, same as before this feature existed).
 - **`outline-plan` is assisted, not automatic.** It writes a proposal file for you to
   review/edit; nothing is committed to `outline.json` until you run
   `outline-commit-proposal`.

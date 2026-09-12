@@ -66,6 +66,34 @@ class Memory:
 
 
 @dataclass
+class Relationship:
+    """A standing relational fact between two named bible entities (almost always two characters,
+    but either side may be any entity name/id -- a character and a location works too, e.g. "banned
+    from") -- exactly "X knows Y" / "Z and Y hate each other from a fight" / "this won't work
+    because of X". Distinct from Memory (an event-derived, ONE-DIRECTIONAL behavioral consequence:
+    "X remembers Y did Z, so acts differently toward Y") and from PlotThread (an ongoing STORY
+    thread, not a relational fact): a Relationship is symmetric, standing background truth, not
+    tied to a single triggering event necessarily. Deliberately kept off the model's plate -- rather
+    than trusting the model to remember "X and Y hate each other" from chapters back, this is pinned
+    into context by the harness itself, deterministically, every time both sides are relevant
+    (context.py's _build_relationships_block), and checked by check_relationship_tensions()
+    (depgraph.py) so a beat bringing two adversarial parties together gets flagged for the
+    author/model to account for rather than silently drafted past. Also the raw, harness-computed
+    material propose_swerve draws on (an unresolved negative relationship to reignite, or two
+    entities with NO relationship at all yet to first collide) -- the model narrates a complication,
+    the harness picks which structural opportunity is actually interesting."""
+    id: str
+    a: str
+    b: str
+    kind: str                    # free text label: "rivals", "married", "estranged siblings", "acquainted", ...
+    polarity: str = "neutral"    # positive | negative | neutral | complicated
+    reason: str = ""             # why, e.g. "a fight over the inheritance"
+    chapter_id: Optional[str] = None
+    status: str = "active"       # active | resolved (a feud ended, a bond mended)
+    origin: str = "manual"       # manual | auto
+
+
+@dataclass
 class Chapter:
     id: str
     title: str
@@ -88,6 +116,22 @@ class Chapter:
                                      # interviewing). Purely a structural/context-assembly hint --
                                      # see context.py's frame block and depgraph.py's "frames" edge.
                                      # None (the common case) means an ordinary, unframed chapter.
+    ending_style: Optional[str] = None  # free-text override of ProjectState.chapter_hook_rule for
+                                         # THIS chapter only, e.g. "end quietly, let this one
+                                         # breathe" or "cut away mid-sentence" -- without this, every
+                                         # chapter in the book ends on the same shape by construction
+                                         # (see context.py's _build_structural_beat_block). None
+                                         # (the common case) falls back to the global rule.
+    mode: str = "outline"            # outline | discovery -- see `direction` below
+    direction: str = ""              # used only when mode == "discovery": a loose one-or-two
+                                      # sentence creative direction instead of a beat checklist --
+                                      # the chapter is drafted to follow it where it naturally leads
+                                      # rather than to hit a prescribed sequence, and `beats` is
+                                      # populated RETROACTIVELY after drafting (pipeline.py's
+                                      # extract_beats_retroactively) purely for downstream display/
+                                      # dependency-graph consumers, not as a plan. `beats` is unused
+                                      # (and should stay empty) for a discovery chapter before it's
+                                      # drafted.
 
 
 def beat_text(beat: Union[str, Dict[str, Any]]) -> str:
@@ -141,6 +185,14 @@ class ProjectState:
     promises: Dict[str, Promise] = field(default_factory=dict)
     motifs: Dict[str, Motif] = field(default_factory=dict)
     memories: Dict[str, Memory] = field(default_factory=dict)
+    relationships: Dict[str, Relationship] = field(default_factory=dict)
+
+    # Motifs the model itself flagged as recurrence-worthy during extraction (pipeline.py's
+    # new_motif_candidates), NOT auto-committed into `motifs` -- unlike a promise or memory, a
+    # motif is an editorial/creative choice about what's worth reinforcing, not a fact, so it waits
+    # for a human/agent to review and either promote_motif_candidate or dismiss_motif_candidate
+    # (storage.py). Each entry: {"id": "<slug>", "phrase": "...", "notes": "...", "chapter_id": "..."}.
+    motif_candidates: List[dict] = field(default_factory=list)
 
     # Genre profile -- populated by `genre-set`, a copy of a preset (see genres.py)
     # that the project can then diverge from freely.
@@ -172,6 +224,8 @@ class ProjectState:
             "promises": {k: asdict(v) for k, v in self.promises.items()},
             "motifs": {k: asdict(v) for k, v in self.motifs.items()},
             "memories": {k: asdict(v) for k, v in self.memories.items()},
+            "relationships": {k: asdict(v) for k, v in self.relationships.items()},
+            "motif_candidates": self.motif_candidates,
             "genre_id": self.genre_id,
             "genre_beats": self.genre_beats,
             "tropes_embrace": self.tropes_embrace,
@@ -195,6 +249,8 @@ class ProjectState:
             promises={k: Promise(**v) for k, v in d.get("promises", {}).items()},
             motifs={k: Motif(**v) for k, v in d.get("motifs", {}).items()},
             memories={k: Memory(**v) for k, v in d.get("memories", {}).items()},
+            relationships={k: Relationship(**v) for k, v in d.get("relationships", {}).items()},
+            motif_candidates=d.get("motif_candidates", []),
             genre_id=d.get("genre_id"),
             genre_beats=d.get("genre_beats", []),
             tropes_embrace=d.get("tropes_embrace", []),

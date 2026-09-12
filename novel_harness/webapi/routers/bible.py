@@ -60,3 +60,33 @@ def resolve_memory(project_id: str, memory_id: str):
         return session.memory_resolve(memory_id)
     except Exception as error:  # noqa: BLE001
         raise as_http_error(error) from error
+
+
+@router.post("/relationships/{relationship_id}/resolve")
+def resolve_relationship(project_id: str, relationship_id: str):
+    """Marks a relationship resolved (a feud ended, a bond mended) -- see
+    AgentSession.relationship_resolve."""
+    session = get_session(project_id)
+    try:
+        return session.relationship_resolve(relationship_id)
+    except Exception as error:  # noqa: BLE001
+        raise as_http_error(error) from error
+
+
+@router.post("/motif-candidates/{candidate_id}/promote")
+def promote_motif_candidate(project_id: str, candidate_id: str, payload: dict = Body(default={})):
+    """{"motif_id": "<optional>", "notes": "<optional>"} -- see AgentSession.motif_candidate_promote."""
+    session = get_session(project_id)
+    try:
+        return session.motif_candidate_promote(candidate_id, payload.get("motif_id"), payload.get("notes"))
+    except Exception as error:  # noqa: BLE001
+        raise as_http_error(error) from error
+
+
+@router.delete("/motif-candidates/{candidate_id}")
+def dismiss_motif_candidate(project_id: str, candidate_id: str):
+    session = get_session(project_id)
+    try:
+        return session.motif_candidate_dismiss(candidate_id)
+    except Exception as error:  # noqa: BLE001
+        raise as_http_error(error) from error

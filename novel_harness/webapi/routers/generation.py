@@ -107,3 +107,46 @@ def audit(project_id: str):
 
     job = job_manager.create("audit", project_id, work)
     return {"job_id": job.id}
+
+
+@router.post("/swerve")
+def swerve_propose(project_id: str):
+    """One model call proposing a genuine narrative complication -- see
+    AgentSession.swerve_propose/pipeline.propose_swerve. Does not write to the bible; the result is
+    for review, then added via /bible (typically as a new plot_thread) if it's worth pursuing."""
+    def work(progress, on_chunk):
+        session = get_session(project_id, progress=progress)
+        return session.swerve_propose()
+
+    job = job_manager.create("swerve", project_id, work)
+    return {"job_id": job.id}
+
+
+@router.post("/outline-search")
+def outline_search(project_id: str, payload: dict | None = Body(default=None)):
+    """{"depth": 3, "branching": 3, "beam_width": 3} -- beam search over candidate outline
+    continuations, scored by pure-Python bible checks. See AgentSession.outline_search/
+    pipeline.search_outline_continuations. Nothing is committed."""
+    payload = payload or {}
+
+    def work(progress, on_chunk):
+        session = get_session(project_id, progress=progress)
+        return session.outline_search(
+            depth=int(payload.get("depth", 3)), branching=int(payload.get("branching", 3)),
+            beam_width=int(payload.get("beam_width", 3)),
+        )
+
+    job = job_manager.create("outline_search", project_id, work)
+    return {"job_id": job.id}
+
+
+@router.post("/outline-search/select")
+def outline_search_select(project_id: str, payload: dict = Body(...)):
+    """{"chapters": [...]} -- one branch's chapters from an outline_search job's result. Saves it
+    as the pending outline proposal; the normal PATCH /plan-proposal review + POST /commit flow
+    applies from there unchanged."""
+    session = get_session(project_id)
+    try:
+        return session.outline_search_select(payload["chapters"])
+    except Exception as error:  # noqa: BLE001
+        raise as_http_error(error) from error

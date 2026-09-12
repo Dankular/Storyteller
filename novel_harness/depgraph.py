@@ -221,3 +221,35 @@ def check_dependencies(state: ProjectState, chapters: List[Chapter]) -> List[Con
                 ))
 
     return flags
+
+
+def check_relationship_tensions(state: ProjectState, chapters: List[Chapter]) -> List[ContinuityFlag]:
+    """Pure-Python, no model call: for each chapter, flags a beat that mentions BOTH sides of a
+    known, unresolved, negative-polarity Relationship (see models.py) -- "you're about to write
+    these two into a scene together and they have unfinished business." This is deliberately NOT a
+    contradiction detector: pure-Python substring matching cannot verify whether the drafted prose
+    actually *honors* the friction (that would require reading for tone/subtext, which is context.py
+    _build_relationships_block's job, feeding the model the fact directly) -- this only catches
+    the cases where the fact was never even surfaced as relevant at plan time, same "note, not
+    proof" spirit as the substring-match caveat documented in this module's docstring."""
+    negative = [r for r in state.relationships.values() if r.status == "active" and r.polarity == "negative"]
+    if not negative:
+        return []
+    flags: List[ContinuityFlag] = []
+    for chapter in chapters:
+        beats_text = "\n".join(beat_text(b) for b in chapter.beats) or chapter.direction
+        if not beats_text:
+            continue
+        for r in negative:
+            if _mentioned([r.a], beats_text) and _mentioned([r.b], beats_text):
+                flags.append(ContinuityFlag(
+                    chapter_id=chapter.id,
+                    issue=(
+                        f"Beats bring together {r.a} and {r.b}, who have an unresolved negative "
+                        f"relationship ({r.kind}" + (f": {r.reason}" if r.reason else "") +
+                        ") -- make sure the friction is accounted for, or resolve it explicitly."
+                    ),
+                    severity="note",
+                    kind="relationship",
+                ))
+    return flags

@@ -98,6 +98,9 @@ export function Workspace() {
   const [pov, setPov] = useState('')
   const [wordTarget, setWordTarget] = useState(2500)
   const [frameOf, setFrameOf] = useState('')
+  const [endingStyle, setEndingStyle] = useState('')
+  const [mode, setMode] = useState('outline')
+  const [direction, setDirection] = useState('')
   const [rows, setRows] = useState<BeatRow[]>([])
   const [saving, setSaving] = useState(false)
   const [sendJobId, setSendJobId] = useState<string | null>(null)
@@ -137,6 +140,9 @@ export function Workspace() {
     setPov(c.pov)
     setWordTarget(c.word_target)
     setFrameOf(c.frame_of ?? '')
+    setEndingStyle(c.ending_style ?? '')
+    setMode(c.mode || 'outline')
+    setDirection(c.direction || '')
     setRows(toRows(c))
     setText(manuscript.text)
   }
@@ -167,7 +173,9 @@ export function Workspace() {
     setSaving(true)
     try {
       await updateChapter(projectId, routedChapterId, {
-        title, pov, word_target: wordTarget, frame_of: frameOf || null, beats: fromRows(rows),
+        title, pov, word_target: wordTarget, frame_of: frameOf || null,
+        ending_style: endingStyle || null, mode, direction,
+        beats: fromRows(rows),
       })
       await load()
     } finally {
@@ -280,10 +288,38 @@ export function Workspace() {
                     ))}
                   </select>
                 </label>
+                <label>
+                  Ending style (overrides the book's default hook rule for this chapter)
+                  <input
+                    value={endingStyle}
+                    onChange={(e) => setEndingStyle(e.target.value)}
+                    placeholder="e.g. 'end quietly, let this one breathe' -- blank uses the book default"
+                  />
+                </label>
+                <label>
+                  Mode
+                  <select value={mode} onChange={(e) => setMode(e.target.value)}>
+                    <option value="outline">outline (beat checklist)</option>
+                    <option value="discovery">discovery (loose direction, no checklist)</option>
+                  </select>
+                </label>
               </div>
 
+              {mode === 'discovery' && (
+                <label>
+                  Direction (a loose starting point -- not a checklist; beats are filled in
+                  retroactively after this chapter is drafted, for the record)
+                  <textarea
+                    value={direction}
+                    onChange={(e) => setDirection(e.target.value)}
+                    rows={2}
+                    placeholder="e.g. 'Torvin decides whether to help Mira.'"
+                  />
+                </label>
+              )}
+
               <details className="beats-details">
-                <summary>Beats ({rows.length})</summary>
+                <summary>Beats ({rows.length}){mode === 'discovery' && ' -- populated after drafting, not a plan'}</summary>
                 <p className="hint">
                   `requires`/`establishes` use entity refs like <code>character:Torvin</code> or{' '}
                   <code>promise:some-id</code> -- leave blank for most beats.

@@ -5,13 +5,13 @@ import json
 import time
 
 from .storage import Project
-from .models import Chapter, Character, Location, Memory, Motif, PlotThread, Promise, beat_text, beat_requires, beat_establishes
-from .depgraph import build_dependency_graph, check_dependencies
+from .models import Chapter, Character, Location, Memory, Motif, PlotThread, Promise, Relationship, beat_text, beat_requires, beat_establishes
+from .depgraph import build_dependency_graph, check_dependencies, check_relationship_tensions
 from .llm import LLMClient, DEFAULT_MODEL
 from .pipeline import (
     generate_chapter, maybe_compress_summary, plan_outline, generate_voice_profile,
     generate_title, generate_character_sheet, plan_book, audit_manuscript, min_chapters_for_remaining_beats,
-    apply_genre,
+    apply_genre, propose_swerve, search_outline_continuations,
 )
 
 
@@ -247,6 +247,13 @@ def cmd_bible_show(args):
         about = f" re: {mem.about}" if mem.about else ""
         print(f"  - [{mem.status}] {mem.id}: {mem.subject}{about} -- {mem.event}")
         print(f"      effect: {mem.effect}")
+    print("Relationships:")
+    for r in state.relationships.values():
+        print(f"  - [{r.status}] {r.id}: {r.a} & {r.b} -- {r.kind} ({r.polarity})" + (f": {r.reason}" if r.reason else ""))
+    if state.motif_candidates:
+        print("Pending motif candidates (motif-candidate-promote / motif-candidate-dismiss):")
+        for cand in state.motif_candidates:
+            print(f"  - {cand.get('id')}: \"{cand.get('phrase')}\"" + (f" -- {cand['notes']}" if cand.get("notes") else ""))
     print("\nRunning summary:\n" + (state.running_summary or "(empty)"))
 
 
@@ -323,6 +330,87 @@ def cmd_memory_rename(args):
 def cmd_memory_resolve(args):
     Project(args.root).resolve_memory(args.id)
     print(f"Resolved memory: {args.id}")
+
+
+def cmd_bible_add_relationship(args):
+    """A standing relational fact between two entities -- "X knows Y", "Z and Y hate each other
+    from a fight" -- pinned into context deterministically whenever both are relevant, and checked
+    by check_relationship_tensions, instead of relying on the model to remember it unprompted."""
+    project = Project(args.root)
+    state = project.load_state()
+    state.relationships[args.id] = Relationship(
+        id=args.id, a=args.a, b=args.b, kind=args.kind, polarity=args.polarity,
+        reason=args.reason or "", chapter_id=args.chapter,
+    )
+    project.save_state(state)
+    print(f"Added relationship: {args.id}")
+
+
+def cmd_relationship_remove(args):
+    Project(args.root).remove_relationship(args.id)
+    print(f"Removed relationship: {args.id}")
+
+
+def cmd_relationship_rename(args):
+    Project(args.root).rename_relationship(args.old, args.new)
+    print(f"Renamed relationship '{args.old}' -> '{args.new}'.")
+
+
+def cmd_relationship_resolve(args):
+    Project(args.root).resolve_relationship(args.id)
+    print(f"Resolved relationship: {args.id}")
+
+
+def cmd_motif_candidates_show(args):
+    state = Project(args.root).load_state()
+    if not state.motif_candidates:
+        print("No pending motif candidates.")
+        return
+    for cand in state.motif_candidates:
+        print(f"- {cand.get('id')}: \"{cand.get('phrase')}\"" + (f" -- {cand['notes']}" if cand.get("notes") else ""))
+        if cand.get("chapter_id"):
+            print(f"    flagged in: {cand['chapter_id']}")
+
+
+def cmd_motif_candidate_promote(args):
+    motif = Project(args.root).promote_motif_candidate(args.id, args.motif_id, args.notes)
+    print(f"Promoted candidate '{args.id}' to motif: {motif.id}")
+
+
+def cmd_motif_candidate_dismiss(args):
+    Project(args.root).dismiss_motif_candidate(args.id)
+    print(f"Dismissed motif candidate: {args.id}")
+
+
+def cmd_swerve_propose(args):
+    """A story editor call brought in specifically to break a plan that's gotten too predictable --
+    see pipeline.propose_swerve. Does NOT write to the bible; review the JSON and add it yourself
+    with bible-add-thread (or update_bible, for an agent) if it's worth pursuing."""
+    client = LLMClient(model=args.model)
+    state = Project(args.root).load_state()
+    result = propose_swerve(client, state)
+    print(json.dumps(result, indent=2))
+
+
+def cmd_outline_search(args):
+    """Beam search over candidate outline continuations -- see pipeline.search_outline_continuations.
+    Nothing is committed; prints each branch's chapters and score. To use one, pass its chapters
+    JSON to a script calling AgentSession.outline_search_select, or hand-copy the winning branch's
+    chapters into outline_proposal.json and run outline-commit-proposal."""
+    client = LLMClient(model=args.model)
+    project = Project(args.root)
+    state = project.load_state()
+    chapters = project.load_outline()
+    branches = search_outline_continuations(
+        client, state, chapters, depth=args.depth, branching=args.branching, beam_width=args.beam_width,
+        progress=lambda m: print(f"[{time.strftime('%H:%M:%S')}] {m}"),
+    )
+    for i, b in enumerate(branches):
+        print(f"\n=== Branch {i + 1}: score {b.score:.1f} ===")
+        for c in b.chapters:
+            print(f"  - {c.get('id')}: {c.get('title')} (pov: {c.get('pov')})")
+    print("\nFull JSON (copy a branch's \"chapters\" into outline_proposal.json + outline-commit-proposal to use it):")
+    print(json.dumps([{"chapters": b.chapters, "score": b.score} for b in branches], indent=2))
 
 
 def cmd_bible_set_style(args):
@@ -563,10 +651,11 @@ def cmd_title_generate(args):
 def cmd_outline_add(args):
     project = Project(args.root)
     chapters = project.load_outline()
-    beats = [b.strip() for b in args.beats.split("|") if b.strip()]
+    beats = [b.strip() for b in args.beats.split("|") if b.strip()] if args.beats else []
     chapters.append(Chapter(
         id=args.id, title=args.title, pov=args.pov or "", beats=beats, word_target=args.words,
         structural_beat=args.structural_beat or None, frame_of=args.frame_of or None,
+        ending_style=args.ending_style or None, mode=args.mode, direction=args.direction or "",
     ))
     project.save_outline(chapters)
     print(f"Added chapter outline: {args.id}")
@@ -577,7 +666,11 @@ def cmd_outline_show(args):
     for c in chapters:
         beat_tag = f", beat: {c.structural_beat}" if c.structural_beat else ""
         frame_tag = f", framed within: {c.frame_of}" if c.frame_of else ""
-        print(f"[{c.status:>8}] {c.id}: {c.title} (POV: {c.pov or '-'}, ~{c.word_target}w{beat_tag}{frame_tag})")
+        ending_tag = f", ending: {c.ending_style}" if c.ending_style else ""
+        mode_tag = f", mode: {c.mode}" if c.mode != "outline" else ""
+        print(f"[{c.status:>8}] {c.id}: {c.title} (POV: {c.pov or '-'}, ~{c.word_target}w{beat_tag}{frame_tag}{ending_tag}{mode_tag})")
+        if c.mode == "discovery":
+            print(f"      direction: {c.direction or '(none given)'}")
         for b in c.beats:
             print(f"      - {beat_text(b)}")
             requires, establishes = beat_requires(b), beat_establishes(b)
@@ -880,6 +973,53 @@ def build_parser():
     sp.add_argument("id")
     sp.set_defaults(func=cmd_memory_resolve)
 
+    sp = sub.add_parser("bible-add-relationship", help="A standing relational fact between two entities ('X knows Y', 'Z and Y hate each other from a fight') -- pinned into context deterministically whenever both are relevant.")
+    sp.add_argument("id")
+    sp.add_argument("a")
+    sp.add_argument("b")
+    sp.add_argument("kind", help="Free text: rivals, married, estranged siblings, acquainted, owes a debt to, ...")
+    sp.add_argument("--polarity", default="neutral", choices=["positive", "negative", "neutral", "complicated"])
+    sp.add_argument("--reason", default="", help="Why, briefly, e.g. 'a fight over the inheritance'")
+    sp.add_argument("--chapter", default=None)
+    sp.set_defaults(func=cmd_bible_add_relationship)
+
+    sp = sub.add_parser("relationship-remove")
+    sp.add_argument("id")
+    sp.set_defaults(func=cmd_relationship_remove)
+
+    sp = sub.add_parser("relationship-rename")
+    sp.add_argument("old")
+    sp.add_argument("new")
+    sp.set_defaults(func=cmd_relationship_rename)
+
+    sp = sub.add_parser("relationship-resolve", help="Marks a relationship resolved (a feud ended, a bond mended) -- stops it being pinned into context.")
+    sp.add_argument("id")
+    sp.set_defaults(func=cmd_relationship_resolve)
+
+    sp = sub.add_parser("motif-candidates-show", help="Lists motifs the model flagged during extraction as recurrence-worthy but not yet promoted.")
+    sp.set_defaults(func=cmd_motif_candidates_show)
+
+    sp = sub.add_parser("motif-candidate-promote", help="Turns a pending motif candidate into a real motif.")
+    sp.add_argument("id", help="The candidate's id (see motif-candidates-show)")
+    sp.add_argument("--motif-id", dest="motif_id", default=None, help="Defaults to the candidate's own id")
+    sp.add_argument("--notes", default=None)
+    sp.set_defaults(func=cmd_motif_candidate_promote)
+
+    sp = sub.add_parser("motif-candidate-dismiss")
+    sp.add_argument("id")
+    sp.set_defaults(func=cmd_motif_candidate_dismiss)
+
+    sp = sub.add_parser("swerve-propose", help="Proposes ONE genuine narrative complication, built from harness-computed structural material (unresolved relationships, never-connected character pairs) when available. Does not write to the bible.")
+    sp.add_argument("--model", default=DEFAULT_MODEL)
+    sp.set_defaults(func=cmd_swerve_propose)
+
+    sp = sub.add_parser("outline-search", help="Beam search over candidate outline continuations, scored by pure-Python bible checks (dependency/relationship/promise/beat coverage) -- see pipeline.search_outline_continuations. Nothing is committed.")
+    sp.add_argument("--depth", type=int, default=3, help="How many chapters ahead to search")
+    sp.add_argument("--branching", type=int, default=3, help="Distinct next-chapter options explored per branch per step")
+    sp.add_argument("--beam-width", type=int, default=3, dest="beam_width", help="How many top branches to keep at each step")
+    sp.add_argument("--model", default=DEFAULT_MODEL)
+    sp.set_defaults(func=cmd_outline_search)
+
     sp = sub.add_parser("bible-set-style")
     sp.add_argument("text")
     sp.set_defaults(func=cmd_bible_set_style)
@@ -968,6 +1108,9 @@ def build_parser():
     sp.add_argument("--beats", default="", help="Pipe-separated list of beats, e.g. 'She arrives|They argue|She leaves'")
     sp.add_argument("--structural-beat", default="", help="Genre beat id this chapter serves, see `genre-show`")
     sp.add_argument("--frame-of", default="", help="Another chapter id this one is narrated from within (e.g. a flashback framed by a present-day chapter)")
+    sp.add_argument("--ending-style", default="", dest="ending_style", help="Free-text override of how THIS chapter ends, e.g. 'end quietly, let this one breathe' -- else falls back to the book's chapter_hook_rule")
+    sp.add_argument("--mode", default="outline", choices=["outline", "discovery"], help="'discovery' drafts from a loose --direction instead of a beat checklist; beats get populated retroactively after drafting")
+    sp.add_argument("--direction", default="", help="Used only with --mode discovery: a loose one-or-two sentence creative direction instead of beats")
     sp.set_defaults(func=cmd_outline_add)
 
     sp = sub.add_parser("outline-show")

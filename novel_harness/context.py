@@ -58,8 +58,12 @@ def _build_structural_beat_block(state: ProjectState, chapters: List[Chapter], c
         lines.append("Genre conventions to embrace: " + "; ".join(state.tropes_embrace))
     if state.tropes_avoid:
         lines.append("Tropes/failure modes to avoid: " + "; ".join(state.tropes_avoid))
-    if state.chapter_hook_rule:
-        lines.append(f"Chapter-ending rule: {state.chapter_hook_rule}")
+    # A chapter's own ending_style overrides the book-wide chapter_hook_rule -- without this every
+    # chapter in the book ends on the same shape by construction (always a hook, never a quiet
+    # landing or a mid-scene cut). See models.Chapter.ending_style.
+    ending_rule = chapter.ending_style or state.chapter_hook_rule
+    if ending_rule:
+        lines.append(f"Chapter-ending rule: {ending_rule}")
     return "\n".join(lines)
 
 
@@ -119,6 +123,34 @@ def _build_memories_block(state: ProjectState, chapter: Chapter, beats_text: str
     )
 
 
+def _build_relationships_block(state: ProjectState, chapter: Chapter, mention_text: str) -> str:
+    """Standing relational facts (Relationship -- see models.py) pinned into context the harness's
+    own way, not the model's: rather than trusting the model to remember "X and Y hate each other"
+    from chapters back, this deterministically re-injects the fact every time BOTH sides are
+    relevant to the current chapter (mentioned in its beats/direction, or one of them is POV).
+    Filtered by co-presence like Memory (not always-pinned like Motif), since most of a large cast's
+    relationships won't matter to any given chapter."""
+    active = [r for r in state.relationships.values() if r.status == "active"]
+    if not active:
+        return ""
+    relevant = [
+        r for r in active
+        if (r.a == chapter.pov or _mentioned([r.a], mention_text))
+        and (r.b == chapter.pov or _mentioned([r.b], mention_text))
+    ]
+    if not relevant:
+        return ""
+    lines = [
+        f"- {r.a} & {r.b}: {r.kind} ({r.polarity})" + (f" -- {r.reason}" if r.reason else "")
+        for r in relevant
+    ]
+    return (
+        "Standing relational facts between people who appear together here -- treat these as "
+        "established truth the characters both already know, not something to reintroduce or "
+        "re-explain:\n" + "\n".join(lines)
+    )
+
+
 def _build_frame_block(project: Project, state: ProjectState, chapter: Chapter) -> str:
     """When chapter.frame_of names another chapter (see models.Chapter.frame_of), pull in that
     frame chapter's POV/voice and a short excerpt -- the embedded chapter is being told FROM
@@ -161,11 +193,17 @@ def _build_promises_block(state: ProjectState, chapter: Chapter, beats_text: str
 
 def build_chapter_context(project: Project, state: ProjectState, chapters: List[Chapter], chapter: Chapter) -> str:
     beats_text = "\n".join(f"- {beat_text(b)}" for b in chapter.beats)
+    # A discovery-mode chapter (models.Chapter.mode) has no beats yet -- beats gets populated
+    # RETROACTIVELY after drafting, purely for downstream display/dependency-graph consumers, not
+    # as a plan. Everything that matches relevance against "what this chapter is about" (promises/
+    # memories/relationships filtering, character/location selection) uses `direction` instead of
+    # the (empty) beats_text for a discovery chapter.
+    mention_text = chapter.direction if chapter.mode == "discovery" else beats_text
 
     char_names = list(state.characters.keys())
     loc_names = list(state.locations.keys())
-    relevant_chars = _mentioned(char_names, beats_text) or char_names
-    relevant_locs = _mentioned(loc_names, beats_text) or loc_names
+    relevant_chars = _mentioned(char_names, mention_text) or char_names
+    relevant_locs = _mentioned(loc_names, mention_text) or loc_names
 
     char_block = "\n".join(
         f"- {name}: {state.characters[name].description} "
@@ -190,9 +228,10 @@ def build_chapter_context(project: Project, state: ProjectState, chapters: List[
 
     structural_beat_block = _build_structural_beat_block(state, chapters, chapter)
     pov_voice_block = _build_pov_voice_block(state, chapter)
-    promises_block = _build_promises_block(state, chapter, beats_text)
+    promises_block = _build_promises_block(state, chapter, mention_text)
     motifs_block = _build_motifs_block(state, chapters, chapter)
-    memories_block = _build_memories_block(state, chapter, beats_text)
+    memories_block = _build_memories_block(state, chapter, mention_text)
+    relationships_block = _build_relationships_block(state, chapter, mention_text)
     frame_block = _build_frame_block(project, state, chapter)
 
     extra_sections = ""
@@ -206,11 +245,26 @@ def build_chapter_context(project: Project, state: ProjectState, chapters: List[
         extra_sections += f"\n## Recurring motifs\n{motifs_block}\n"
     if memories_block:
         extra_sections += f"\n## Remembered incidents (affects how characters treat each other)\n{memories_block}\n"
+    if relationships_block:
+        extra_sections += f"\n## Relationships\n{relationships_block}\n"
     if frame_block:
         extra_sections += f"\n## Frame narrative\n{frame_block}\n"
 
     tags_block = f"\n## Focus / themes to keep alive throughout\n{', '.join(state.tags)}\n" if state.tags else ""
     genre_block = f"\n## Genre\n{state.genre_id}\n" if state.genre_id else ""
+
+    if chapter.mode == "discovery":
+        plan_section = f"""Loose direction for this chapter -- a starting point, not a checklist. You are \
+NOT required to hit specific beats in a specific order; follow the direction where the scene and \
+characters actually lead, and let the chapter discover its own shape. If something more interesting \
+than the direction presents itself along the way, take it:
+{chapter.direction or "(no direction given -- follow naturally from the story so far and the open threads above)"}"""
+    else:
+        plan_section = f"""Beats to hit, in order. Vary pacing deliberately: dilate the beats that carry emotional weight
+into full scenes with room to breathe, and it's fine to compress a purely transitional beat into a
+sentence or two of summary on purpose -- that's a legitimate pacing choice, not a shortcut, as long
+as it's a genuine choice and not every beat getting the thin treatment:
+{beats_text}"""
 
     return f"""# Story: {state.title}
 
@@ -236,9 +290,5 @@ def build_chapter_context(project: Project, state: ProjectState, chapters: List[
 ## This chapter to write: {chapter.title} (POV: {chapter.pov or "unspecified"})
 Target length: ~{chapter.word_target} words.
 
-Beats to hit, in order. Vary pacing deliberately: dilate the beats that carry emotional weight
-into full scenes with room to breathe, and it's fine to compress a purely transitional beat into a
-sentence or two of summary on purpose -- that's a legitimate pacing choice, not a shortcut, as long
-as it's a genuine choice and not every beat getting the thin treatment:
-{beats_text}
+{plan_section}
 """

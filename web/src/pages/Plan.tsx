@@ -1,8 +1,12 @@
 import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { commitPlan, getSnapshot, startPlan, updatePlanProposal } from '../api'
+import {
+  commitPlan, getSnapshot, selectOutlineSearchBranch, startOutlineSearch, startPlan, startSwerve,
+  updatePlanProposal,
+} from '../api'
 import { useJob } from '../useJob'
 import { useJobsContext } from '../JobsContext'
+import type { OutlineBranch } from '../types'
 
 /** Triggers outline-plan/book-plan (a job -- the Architect role, see pipeline.py), shows the raw
  * proposal once it lands, lets you edit it as JSON before committing, matching the CLI's
@@ -17,6 +21,15 @@ export function Plan() {
   const [proposalText, setProposalText] = useState('')
   const [error, setError] = useState<string | null>(null)
   const job = useJob(jobId)
+
+  const [swerveJobId, setSwerveJobId] = useState<string | null>(null)
+  const swerveJob = useJob(swerveJobId)
+
+  const [searchDepth, setSearchDepth] = useState(3)
+  const [searchBranching, setSearchBranching] = useState(3)
+  const [searchBeamWidth, setSearchBeamWidth] = useState(3)
+  const [searchJobId, setSearchJobId] = useState<string | null>(null)
+  const searchJob = useJob(searchJobId)
 
   const loadExistingProposal = async () => {
     if (!projectId) return
@@ -69,6 +82,36 @@ export function Plan() {
     }
   }
 
+  const proposeSwerve = async () => {
+    if (!projectId) return
+    const { job_id } = await startSwerve(projectId)
+    setSwerveJobId(job_id)
+    track(job_id, 'Propose a swerve')
+  }
+
+  const runOutlineSearch = async () => {
+    if (!projectId) return
+    setError(null)
+    const { job_id } = await startOutlineSearch(projectId, searchDepth, searchBranching, searchBeamWidth)
+    setSearchJobId(job_id)
+    track(job_id, `Outline search (depth ${searchDepth})`)
+  }
+
+  const useBranch = async (branch: OutlineBranch) => {
+    if (!projectId) return
+    setError(null)
+    try {
+      await selectOutlineSearchBranch(projectId, branch.chapters)
+      setWholeBook(false)
+      setProposalText(JSON.stringify(branch.chapters, null, 2))
+    } catch (err) {
+      setError(String(err))
+    }
+  }
+
+  const swerveResult = swerveJob.status === 'succeeded' ? (swerveJob.result as Record<string, unknown> | null) : null
+  const searchBranches = searchJob.status === 'succeeded' ? ((searchJob.result as { branches: OutlineBranch[] } | null)?.branches ?? []) : []
+
   return (
     <div className="page">
       <h1>Plan</h1>
@@ -94,6 +137,65 @@ export function Plan() {
       </div>
 
       {error && <p className="error">{error}</p>}
+
+      <h2>Propose a swerve</h2>
+      <p className="hint">
+        A story editor brought in specifically to break a plan that's gotten too predictable --
+        built from harness-computed structural material (an unresolved negative relationship to
+        reignite, or a never-connected character pair to first collide) when there's any available.
+        Does not write to the bible; review it and add it yourself (typically as a plot thread in
+        the Characters/Story drawer) if it's worth pursuing.
+      </p>
+      <button onClick={proposeSwerve} disabled={swerveJob.status === 'running'}>
+        {swerveJob.status === 'running' ? 'Thinking…' : 'Propose a swerve'}
+      </button>
+      {swerveJob.status === 'failed' && <p className="error">{swerveJob.error}</p>}
+      {swerveResult && (
+        <div className="summary">
+          <p><strong>{String(swerveResult.description)}</strong></p>
+          <p className="hint">{String(swerveResult.rationale)}</p>
+          {Array.isArray(swerveResult.touches) && swerveResult.touches.length > 0 && (
+            <p className="hint">Touches: {(swerveResult.touches as string[]).join(', ')}</p>
+          )}
+        </div>
+      )}
+
+      <h2>Search the outline</h2>
+      <p className="hint">
+        Beam search over candidate outline continuations, scored by pure-Python bible checks
+        (dependency/relationship-tension/promise-payoff/beat coverage) instead of an LLM judging
+        prose that doesn't exist yet -- see AGENTS.md. Nothing is committed until you pick a branch
+        below and then Commit as usual.
+      </p>
+      <div className="plan-form">
+        <label>
+          Depth (chapters ahead)
+          <input type="number" value={searchDepth} onChange={(e) => setSearchDepth(Number(e.target.value))} />
+        </label>
+        <label>
+          Branching (options explored per step)
+          <input type="number" value={searchBranching} onChange={(e) => setSearchBranching(Number(e.target.value))} />
+        </label>
+        <label>
+          Beam width (branches kept)
+          <input type="number" value={searchBeamWidth} onChange={(e) => setSearchBeamWidth(Number(e.target.value))} />
+        </label>
+        <button onClick={runOutlineSearch} disabled={searchJob.status === 'running'}>
+          {searchJob.status === 'running' ? 'Searching…' : 'Search'}
+        </button>
+      </div>
+      {searchJob.status === 'failed' && <p className="error">{searchJob.error}</p>}
+      {searchBranches.length > 0 && (
+        <ul className="entity-list">
+          {searchBranches.map((b, i) => (
+            <li key={i}>
+              <strong>Branch {i + 1}</strong> -- score {b.score.toFixed(1)}
+              <p>{b.chapters.map((c) => `${c.id}: ${c.title}`).join(' -> ')}</p>
+              <button onClick={() => useBranch(b)}>Use this branch</button>
+            </li>
+          ))}
+        </ul>
+      )}
 
       {proposalText && (
         <>

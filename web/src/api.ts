@@ -73,6 +73,19 @@ export const resolveMemory = (id: string, memoryId: string) =>
   request<Record<string, unknown>>(`/api/projects/${id}/memories/${memoryId}/resolve`, {
     method: 'POST',
   })
+export const resolveRelationship = (id: string, relationshipId: string) =>
+  request<Record<string, unknown>>(`/api/projects/${id}/relationships/${relationshipId}/resolve`, {
+    method: 'POST',
+  })
+export const promoteMotifCandidate = (id: string, candidateId: string, motifId?: string, notes?: string) =>
+  request<Record<string, unknown>>(`/api/projects/${id}/motif-candidates/${encodeURIComponent(candidateId)}/promote`, {
+    method: 'POST',
+    body: json({ motif_id: motifId, notes }),
+  })
+export const dismissMotifCandidate = (id: string, candidateId: string) =>
+  request<Record<string, unknown>>(`/api/projects/${id}/motif-candidates/${encodeURIComponent(candidateId)}`, {
+    method: 'DELETE',
+  })
 
 // ---- outline ----
 export const addChapters = (id: string, chapters: Partial<Chapter>[]) =>
@@ -134,6 +147,18 @@ export const commitPlan = (id: string, wholeBook: boolean) =>
   })
 export const startAudit = (id: string) =>
   request<{ job_id: string }>(`/api/projects/${id}/audit`, { method: 'POST' })
+export const startSwerve = (id: string) =>
+  request<{ job_id: string }>(`/api/projects/${id}/swerve`, { method: 'POST' })
+export const startOutlineSearch = (id: string, depth: number, branching: number, beamWidth: number) =>
+  request<{ job_id: string }>(`/api/projects/${id}/outline-search`, {
+    method: 'POST',
+    body: json({ depth, branching, beam_width: beamWidth }),
+  })
+export const selectOutlineSearchBranch = (id: string, chapters: Record<string, unknown>[]) =>
+  request<Record<string, unknown>>(`/api/projects/${id}/outline-search/select`, {
+    method: 'POST',
+    body: json({ chapters }),
+  })
 
 // ---- jobs ----
 export const getJob = (jobId: string) => request<JobState>(`/api/jobs/${jobId}`)
