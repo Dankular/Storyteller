@@ -6,7 +6,7 @@ import time
 
 from .storage import Project
 from .models import Chapter, Character, Location, Memory, Motif, PlotThread, Promise, Relationship, beat_text, beat_requires, beat_establishes
-from .depgraph import build_dependency_graph, check_dependencies, check_relationship_tensions
+from .depgraph import build_dependency_graph, check_authoring_coverage, check_dependencies, check_relationship_tensions
 from .llm import LLMClient, DEFAULT_MODEL
 from .pipeline import (
     generate_chapter, maybe_compress_summary, plan_outline, generate_voice_profile,
@@ -760,7 +760,9 @@ def cmd_dependency_check(args):
     before it's opened -- runs automatically as part of `generate` too; this checks the whole
     current outline+bible on demand, including chapters that haven't been drafted yet."""
     project = Project(args.root)
-    flags = check_dependencies(project.load_state(), project.load_outline())
+    state = project.load_state()
+    chapters = project.load_outline()
+    flags = check_dependencies(state, chapters) + check_authoring_coverage(state, chapters)
     if not flags:
         print("No dependency issues found.")
         return

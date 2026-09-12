@@ -223,6 +223,47 @@ def check_dependencies(state: ProjectState, chapters: List[Chapter]) -> List[Con
     return flags
 
 
+def check_authoring_coverage(state: ProjectState, chapters: List[Chapter]) -> List[ContinuityFlag]:
+    """Pure-Python, no model call: a craft nudge, not a validity check -- complements
+    check_dependencies (which validates authored/inferred edges that exist) by pointing at beats
+    that would most benefit from an authored edge but don't have one yet. Flags a beat that
+    substring-mentions two or more named characters/locations (context._mentioned, the same match
+    bible-relevance filtering and inferred `references` edges already use) but declares no
+    `requires`/`establishes` at all (models.beat_requires/beat_establishes both empty) -- exactly
+    the kind of beat that "genuinely turns on a specific named character/location" per
+    BEAT_DEPENDENCY_SCHEMA_NOTE in pipeline.py, and so the one where an exact edge would replace a
+    guessable one. Restricted to characters/locations (not plot_threads/promises, whose "name" is a
+    free-text description substring match would false-positive on constantly). Severity is always
+    "note" -- most beats legitimately need nothing declared, so this is a suggestion to consider
+    authoring more precisely, never a detected defect."""
+    entity_names = list(state.characters.keys()) + list(state.locations.keys())
+    if not entity_names:
+        return []
+    flags: List[ContinuityFlag] = []
+    for chapter in chapters:
+        for beat in chapter.beats:
+            if beat_requires(beat) or beat_establishes(beat):
+                continue
+            text = beat_text(beat)
+            if not text:
+                continue
+            mentioned = _mentioned(entity_names, text)
+            if len(mentioned) < 2:
+                continue
+            names = ", ".join(mentioned[:4]) + (", ..." if len(mentioned) > 4 else "")
+            flags.append(ContinuityFlag(
+                chapter_id=chapter.id,
+                issue=(
+                    f"Beat mentions {len(mentioned)} bible entities ({names}) but declares no "
+                    f"requires/establishes: \"{text[:80]}\" -- consider authoring an exact "
+                    "dependency edge instead of relying on substring inference."
+                ),
+                severity="note",
+                kind="dependency",
+            ))
+    return flags
+
+
 def check_relationship_tensions(state: ProjectState, chapters: List[Chapter]) -> List[ContinuityFlag]:
     """Pure-Python, no model call: for each chapter, flags a beat that mentions BOTH sides of a
     known, unresolved, negative-polarity Relationship (see models.py) -- "you're about to write

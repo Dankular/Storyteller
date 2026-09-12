@@ -22,7 +22,7 @@ import time
 from dataclasses import asdict
 from typing import Any, Callable
 
-from .depgraph import build_dependency_graph, check_dependencies
+from .depgraph import build_dependency_graph, check_authoring_coverage, check_dependencies
 from .llm import DEFAULT_MODEL, LLMClient
 from .models import Character, Chapter, Location, Memory, Motif, PlotThread, Promise, Relationship
 from .pipeline import (
@@ -342,10 +342,15 @@ class AgentSession:
     def dependency_check(self) -> dict:
         """Pure-Python, no model call: flags a chapter's beats referencing something established
         in a later chapter, a promise due at or before its own setup, or a thread resolved before
-        it's opened. Runs automatically as part of `generate`; this is the standalone entry point
-        for checking the whole current outline+bible on demand. Flags are appended to
-        continuity_log.json (kind="dependency"), resolvable later via `continuity_resolve`."""
-        flags = check_dependencies(self._state(), self.project.load_outline())
+        it's opened -- plus (check_authoring_coverage) a "note"-severity nudge for a beat that
+        substring-mentions 2+ named characters/locations but declares no requires/establishes, a
+        craft suggestion rather than a detected violation. Runs automatically as part of
+        `generate`; this is the standalone entry point for checking the whole current
+        outline+bible on demand. Flags are appended to continuity_log.json (kind="dependency"),
+        resolvable later via `continuity_resolve`."""
+        state = self._state()
+        chapters = self.project.load_outline()
+        flags = check_dependencies(state, chapters) + check_authoring_coverage(state, chapters)
         if flags:
             self.project.add_continuity_flags(flags)
         return {"flags": [asdict(f) for f in flags]}

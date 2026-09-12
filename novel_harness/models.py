@@ -212,6 +212,11 @@ class ProjectState:
 
     narrator_voice_id: Optional[str] = None  # voice-catalog id used for non-dialogue narration lines in --narrate
 
+    # How many chapters were "written" (status != planned) the last time pipeline.audit_manuscript
+    # actually ran -- compared against the CURRENT written count (pipeline._report_audit_nudge) to
+    # advise running `audit` again once enough chapters have piled up since. 0 means never audited.
+    last_manuscript_audit_count: int = 0
+
     def to_json(self) -> dict:
         return {
             "title": self.title,
@@ -234,6 +239,7 @@ class ProjectState:
             "target_chapters": self.target_chapters,
             "tags": self.tags,
             "narrator_voice_id": self.narrator_voice_id,
+            "last_manuscript_audit_count": self.last_manuscript_audit_count,
         }
 
     @staticmethod
@@ -259,4 +265,5 @@ class ProjectState:
             target_chapters=d.get("target_chapters", 0),
             tags=d.get("tags", []),
             narrator_voice_id=d.get("narrator_voice_id"),
+            last_manuscript_audit_count=d.get("last_manuscript_audit_count", 0),
         )

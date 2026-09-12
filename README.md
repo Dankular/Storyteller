@@ -4,6 +4,9 @@ A harness for writing long-form fiction with an LLM, built around one core probl
 **no model's context window holds a whole novel**, so consistency, genre structure, and
 setups actually paying off have to be engineered, not hoped for.
 
+See `DESIGN_PHILOSOPHY.md` for the design principles behind how this is built — useful reading
+before proposing a new feature, not just for understanding an existing one.
+
 ## How it works
 
 A project is a directory on disk with:
@@ -117,6 +120,23 @@ mid-size models (70B-class) already couldn't fill it in consistently. A beat tha
 or declares it wrong, just falls back to substring inference exactly as before (`_parse_entity_ref`
 silently drops anything that doesn't parse as `kind:id`) — the deterministic check itself is what
 you can actually rely on, same as the promise-staleness audit above.
+
+`dependency-check`/`dependency_check` also runs `check_authoring_coverage` (`depgraph.py`) alongside
+the checks above: a pure-Python, "note"-severity nudge (never a detected violation) for a beat that
+substring-mentions two or more named characters/locations but declares no `requires`/`establishes`
+at all — exactly the beat that would most benefit from an authored edge instead of leaning on
+substring inference. It only looks at characters/locations (matched by exact name), not plot
+threads/promises (matched only by free-text description, which would false-positive constantly on
+incidental phrase overlap).
+
+**Pre-draft check.** `generate`/`continue_chapter` (`pipeline.generate_chapter`/`continue_and_extract`)
+run `pipeline.preflight_check_chapter` before spending any model calls — the same
+`check_dependencies`/`check_relationship_tensions` logic the post-hoc check runs, filtered to just
+the chapter about to be (re)written, surfaced only via the `progress` callback (stderr for agents,
+the live log for the CLI/web UI), not persisted to `continuity_log.json` — the unfiltered post-hoc
+check still runs afterward and is the one that actually records flags. The point is catching an
+already-knowable forward reference or relational tension before, not after, the ~13-call `generate`
+pipeline runs on top of it.
 
 ### Recurring motifs
 
@@ -257,11 +277,19 @@ their interiority reads — either hand-written (`voice-set`) or drafted by the 
 their description and any chapters already written in their POV (`voice-generate`).
 Whenever a chapter's POV character has a voice profile, it's pinned into that chapter's
 context, and a dedicated POV-consistency check flags head-hopping or voice drift
-separately from general continuity issues.
+separately from general continuity issues. If a chapter's POV character has *no* voice
+profile at all, the same check now also logs a "note"-severity `pov` flag saying so — both
+the context-assembly block and the drift check itself have nothing concrete to hold voice
+consistency against without one, so this is a grounding gap worth surfacing on its own,
+not just a silent no-op.
 
 ### The generation pipeline (`novel_harness/pipeline.py`)
 
-For each chapter, `generate_chapter()` runs:
+Before any of the below, `generate_chapter()`/`continue_and_extract()` run a **pre-draft check**
+(`pipeline.preflight_check_chapter`) — `check_dependencies`/`check_relationship_tensions`, filtered
+to just this chapter, surfaced via `progress` only (not persisted) — so an already-knowable forward
+reference or relational tension is visible before, not just after, the model calls below run. For
+each chapter, `generate_chapter()` then runs:
 
 1. **Context assembly** (`context.py`) — style guide, running summary, relevant bible
    entries (matched by name against the beat text, falling back to the full bible), the
@@ -313,6 +341,12 @@ For each chapter, `generate_chapter()` runs:
     something established later, a promise due at/before its own setup, or a thread
     resolved before it's opened (see "Structural dependency graph" above).
 11. **Summary compression** — condensed once the running summary passes ~900 words.
+12. **Periodic-audit nudge** — pure Python, no model call: compares how many chapters have been
+    written against `state.last_manuscript_audit_count` (last set by `audit`) and, once
+    `pipeline.AUDIT_NUDGE_INTERVAL` (6) chapters have passed since, suggests running `audit` via
+    `progress` — advisory only, since the per-chapter checks above only ever compare a new chapter
+    against the compressed running summary and the immediately preceding chapter's text, never the
+    full prior manuscript the way `audit` does.
 
 Every step is also exposed individually in `pipeline.py`, so you can run this
 semi-manually instead of unattended — e.g. approve a draft before revision, or eyeball

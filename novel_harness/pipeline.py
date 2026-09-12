@@ -22,7 +22,7 @@ from .llm import LLMClient
 from .storage import Project
 from .models import ProjectState, Chapter, ContinuityFlag, Character, Location, PlotThread, Promise, Memory, Relationship, beat_text
 from .context import build_chapter_context, _resolve_structural_beat, _mentioned
-from .depgraph import check_dependencies, check_relationship_tensions
+from .depgraph import check_authoring_coverage, check_dependencies, check_relationship_tensions
 from .genres import GenrePreset, match_preset, clone_preset_beats
 
 Progress = Callable[[str], None]
@@ -629,6 +629,22 @@ def check_pov_consistency(
         progress(f"Checking POV consistency for {chapter.pov or 'unspecified POV'}...")
     char = state.characters.get(chapter.pov)
     voice = char.voice_notes if char else ""
+    flags: List[ContinuityFlag] = []
+    if chapter.pov and not voice:
+        # Not a detected drift -- a grounding gap: this check (and context._build_pov_voice_block)
+        # both have nothing concrete to compare/pin against without a voice profile, so voice
+        # consistency for this chapter is resting on the model's own judgment alone. `note`
+        # severity, same as check_authoring_coverage -- a suggestion, not a defect.
+        flags.append(ContinuityFlag(
+            chapter_id="",
+            issue=(
+                f"POV character '{chapter.pov}' has no voice profile set -- this check (and chapter "
+                "context) has nothing concrete to hold voice consistency against. Consider "
+                "`voice-generate`/`voice-set`."
+            ),
+            severity="note",
+            kind="pov",
+        ))
     brief = (
         f"POV character: {chapter.pov or 'unspecified'}\nVoice profile: {voice or '(none specified)'}\n\n"
         f"Chapter:\n{chapter_text}"
@@ -637,7 +653,7 @@ def check_pov_consistency(
     issues = result.get("issues", [])
     if progress:
         progress(f"POV check: {len(issues)} issue(s) found.")
-    return [
+    return flags + [
         ContinuityFlag(chapter_id="", issue=i["issue"], severity=i.get("severity", "note"), kind="pov")
         for i in issues
     ]
@@ -1127,6 +1143,14 @@ def audit_manuscript(
     issues = result.get("issues", [])
     if progress:
         progress(f"Manuscript audit: {len(issues)} cross-chapter issue(s) found.")
+
+    # Records that an audit just happened AT this many written chapters, so _report_audit_nudge
+    # (generate_chapter/continue_and_extract) knows how long it's been since -- an audit run from
+    # here always counts, whether or not it actually found anything to flag.
+    state = project.load_state()
+    state.last_manuscript_audit_count = len(written)
+    project.save_state(state)
+
     return [
         ContinuityFlag(
             chapter_id=i.get("chapters", ""), issue=i["issue"], severity=i.get("severity", "note"),
@@ -1307,6 +1331,53 @@ def propose_swerve(client: LLMClient, state: ProjectState) -> dict:
     return result
 
 
+def preflight_check_chapter(state: ProjectState, chapters: List[Chapter], chapter_id: str) -> List[ContinuityFlag]:
+    """Pure-Python, no model call: runs the same structural checks generate_chapter/
+    continue_and_extract already run AFTER drafting (check_dependencies, check_relationship_tensions)
+    -- but BEFORE any model call is spent, filtered down to just the chapter about to be
+    (re)written. A forward reference or an unresolved relational tension already knowable from the
+    CURRENT bible+outline is exactly as detectable now as it is after drafting; catching it here
+    means it surfaces before ~13 model calls (generate_chapter's full pipeline) are spent building a
+    chapter on top of it, not after. This is advisory only -- surfaced via `progress`, not persisted
+    to continuity_log.json, since the full post-hoc check below re-runs unfiltered and would
+    otherwise double-log the same issue; it does not replace that check, since state can change
+    from THIS chapter's own extraction, which a pre-draft check can't see yet."""
+    dep_flags = [f for f in check_dependencies(state, chapters) if f.chapter_id == chapter_id]
+    rel_flags = [f for f in check_relationship_tensions(state, chapters) if f.chapter_id == chapter_id]
+    return dep_flags + rel_flags
+
+
+def _report_preflight(progress: Optional[Progress], state: ProjectState, chapters: List[Chapter], chapter_id: str) -> None:
+    if not progress:
+        return
+    flags = preflight_check_chapter(state, chapters, chapter_id)
+    for f in flags:
+        progress(f"Pre-draft check ({f.kind}): {f.issue}")
+
+
+AUDIT_NUDGE_INTERVAL = 6  # chapters written since the last full-manuscript audit before nudging
+
+
+def _report_audit_nudge(progress: Optional[Progress], project: Project, state: ProjectState) -> None:
+    """Advisory only, like _report_preflight -- audit_manuscript itself (not this) is what updates
+    state.last_manuscript_audit_count, so this just compares against whatever it was last set to
+    and suggests running `audit` once enough chapters have accumulated since. Per-chapter checks
+    (continuity/pov/tension) only ever compare a new chapter against the compressed running
+    summary and the immediately preceding chapter's text, never the full prior manuscript -- audit
+    is the only check that reads every chapter's actual text together, which is why it doesn't run
+    on every `generate` call by default (README's "Design notes")."""
+    if not progress:
+        return
+    written = sum(1 for c in project.load_outline() if c.status != "planned")
+    gap = written - state.last_manuscript_audit_count
+    if gap >= AUDIT_NUDGE_INTERVAL:
+        progress(
+            f"{written} chapters written, {gap} since the last full manuscript audit -- "
+            "consider running `audit` (it cross-checks actual chapter text, not just the "
+            "compressed running summary)."
+        )
+
+
 def generate_chapter(
     client: LLMClient,
     project: Project,
@@ -1325,6 +1396,7 @@ def generate_chapter(
     state = project.load_state()
     chapters = project.load_outline()
     chapter = project.get_chapter(chapter_id)
+    _report_preflight(progress, state, chapters, chapter_id)
 
     def _safe_stage(stage_name: str, fn, *fn_args, **fn_kwargs):
         """Run an auxiliary pipeline stage (a check/extraction) without letting its failure
@@ -1483,10 +1555,17 @@ def generate_chapter(
             if progress:
                 progress(f"Relationship check: {len(relationship_flags)} unresolved tension(s) flagged.")
 
+        authoring_flags = check_authoring_coverage(state, chapters)
+        if authoring_flags:
+            project.add_continuity_flags(authoring_flags)
+            if progress:
+                progress(f"Authoring-coverage check: {len(authoring_flags)} beat(s) could use an explicit requires/establishes.")
+
         state, _ = _safe_stage("Summary compression", maybe_compress_summary, client, state, progress=progress)
         if state is None:
             state = new_state  # compression failed -- keep the pre-compression (still valid) state
         project.save_state(state)
+        _report_audit_nudge(progress, project, state)
     # If extraction itself failed, the bible is left untouched rather than half-updated --
     # the chapter text and its status are already saved regardless.
 
@@ -1514,6 +1593,7 @@ def continue_and_extract(
     state = project.load_state()
     chapters = project.load_outline()
     chapter = project.get_chapter(chapter_id)
+    _report_preflight(progress, state, chapters, chapter_id)
 
     if edited_text is not None:
         project.save_chapter_text(chapter_id, edited_text)
@@ -1560,7 +1640,12 @@ def continue_and_extract(
         if relationship_flags:
             project.add_continuity_flags(relationship_flags)
 
+        authoring_flags = check_authoring_coverage(state, chapters)
+        if authoring_flags:
+            project.add_continuity_flags(authoring_flags)
+
         project.save_state(state)
+        _report_audit_nudge(progress, project, state)
 
     if progress:
         progress(f"Chapter '{chapter_id}' continued -> {len(full_text.split())} words total.")
