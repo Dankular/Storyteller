@@ -1,0 +1,33 @@
+# Render blueprint for the novel_harness web UI (novel_harness/webapi/ + web/).
+# https://render.com/docs/blueprint-spec
+#
+# A persistent disk is required: without one, every novel created via the browser (or the
+# project registry itself, ~/.novel_harness/projects.json) would live on the service's container
+# filesystem, which Render wipes on every restart/redeploy. NOVEL_HARNESS_ROOT and HOME both point
+# at the mounted disk so new projects *and* the registry survive across deploys.
+services:
+  - type: web
+    name: storyteller
+    runtime: python
+    plan: starter
+    buildCommand: >
+      pip install -r requirements.txt &&
+      cd web && npm ci && npm run build
+    startCommand: python -m novel_harness.webapi --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/projects
+    disk:
+      name: storyteller-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.5
+      - key: HOME
+        value: /data
+      - key: NOVEL_HARNESS_ROOT
+        value: /data/novels
+      - key: INFERDEX_API_KEY
+        sync: false   # set manually in the Render dashboard -- never committed
+      # Optional overrides (uncomment/set in the dashboard if not using the InferDex default):
+      # - key: INFERDEX_BASE_URL
+      # - key: INFERDEX_MODEL

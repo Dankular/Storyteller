@@ -1,0 +1,141 @@
+// Mirrors novel_harness's dataclasses (models.py) and the webapi's JSON shapes exactly --
+// keep these in sync by hand; there's no shared schema generation in this v1.
+
+export interface Character {
+  name: string
+  description: string
+  status: string
+  arc_notes: string
+  voice_notes: string
+  voice_id: string | null
+  introduced_in: string | null
+}
+
+export interface Location {
+  name: string
+  description: string
+  introduced_in: string | null
+}
+
+export interface PlotThread {
+  id: string
+  description: string
+  opened_in: string | null
+  resolved_in: string | null
+  status: string
+}
+
+export interface Promise {
+  id: string
+  description: string
+  planted_in: string | null
+  due_by: string | null
+  status: string
+  origin: string
+  paid_in: string | null
+}
+
+// A beat is either a plain string, or an object declaring authored dependencies -- see
+// models.py's Chapter.beats docstring.
+export type StructuredBeat = { text: string; requires?: string[]; establishes?: string[] }
+export type Beat = string | StructuredBeat
+
+export function beatText(b: Beat): string {
+  return typeof b === 'string' ? b : b.text
+}
+export function beatRequires(b: Beat): string[] {
+  return typeof b === 'string' ? [] : b.requires ?? []
+}
+export function beatEstablishes(b: Beat): string[] {
+  return typeof b === 'string' ? [] : b.establishes ?? []
+}
+
+export interface Chapter {
+  id: string
+  title: string
+  pov: string
+  beats: Beat[]
+  word_target: number
+  status: string // planned | drafted | revised | final
+  file: string | null
+  structural_beat: string | null
+}
+
+export interface ContinuityFlag {
+  chapter_id: string
+  issue: string
+  severity: string
+  resolved: boolean
+  kind: string
+}
+
+export interface ProjectState {
+  title: string
+  premise: string
+  style_guide: string
+  running_summary: string
+  characters: Record<string, Character>
+  locations: Record<string, Location>
+  plot_threads: Record<string, PlotThread>
+  promises: Record<string, Promise>
+  genre_id: string | null
+  genre_beats: unknown[]
+  tropes_embrace: string[]
+  tropes_avoid: string[]
+  chapter_hook_rule: string
+  target_chapters: number
+  tags: string[]
+  narrator_voice_id: string | null
+}
+
+export interface Snapshot {
+  state: ProjectState
+  outline: Chapter[]
+  continuity: ContinuityFlag[]
+  proposals: { outline: unknown[]; book_plan: unknown[] }
+}
+
+export interface ProjectEntry {
+  id: string
+  name: string
+  path: string
+}
+
+export interface GraphNode {
+  id: string
+  kind: string // "chapter" | "character" | "location" | "plot_thread" | "promise"
+  label: string
+  established_at: string | null
+}
+
+export interface GraphEdge {
+  source: string
+  target: string
+  kind: string // "establishes" | "references"
+}
+
+export interface DependencyGraph {
+  nodes: GraphNode[]
+  edges: GraphEdge[]
+}
+
+export interface AffectedChapter {
+  id: string
+  title: string
+  status: string
+}
+
+export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed'
+
+export interface JobState {
+  id: string
+  kind: string
+  project_id: string
+  status: JobStatus
+  progress: string[]
+  result: unknown
+  error: string | null
+  created_at: number
+  started_at: number | null
+  finished_at: number | null
+}

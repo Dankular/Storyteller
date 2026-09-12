@@ -1,0 +1,13 @@
+# Core harness (Project, LLMClient, pipeline, CLI) has no dependencies beyond the Python
+# standard library -- llm.py talks to the InferDex endpoint over plain urllib.
+
+# Web UI (novel_harness/webapi/ -- `python -m novel_harness.webapi`, paired with the React app in
+# web/). Nothing else in novel_harness imports this package, so the core harness/CLI/agent_wrapper
+# stay usable without these installed.
+fastapi>=0.110
+uvicorn>=0.29
+websockets>=12.0
+
+# Narration (voice-*/narrate/--narrate) needs a much heavier optional stack (torch et al.) --
+# kept in its own file, requirements-narration.txt, so a plain-text or web-UI-only install (e.g.
+# a Render deploy) doesn't have to pull in torch at all.

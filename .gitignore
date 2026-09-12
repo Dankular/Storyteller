@@ -1,0 +1,20 @@
+# Vendored/unrelated sub-projects that live alongside this repo on disk but aren't part of it
+# (Breeze-TTS-2.cpp is its own separate git clone; .venv-narration is a local virtualenv)
+/Breeze-TTS-2.cpp/
+/.venv-narration/
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+
+# Web frontend (web/)
+web/node_modules/
+web/dist/
+
+# Local novel_harness projects/scratch data, if ever created under the repo root
+/state.json
+/outline.json
+/continuity_log.json
+/manuscript/

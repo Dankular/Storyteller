@@ -1,0 +1,23 @@
+# Optional, only needed for narration (novel_harness/narration.py + the `voice-*`/`narrate`
+# CLI commands / `generate --narrate`). Split out from requirements.txt so the (much more common)
+# web UI / plain-text deploy doesn't have to pull in torch -- see requirements.txt.
+soundfile>=0.12       # reading/writing the wav files this module produces
+librosa>=0.10          # decoding downloaded voice-preview mp3s to wav
+torch>=2.5.0           # only for torchaudio's resampler in _transcribe
+torchaudio>=2.5.0
+transformers>=4.40.0   # Whisper ASR (openai/whisper-base) for auto-transcribing reference clips --
+                        # this one, unlike the TTS model below, works fine on any recent version.
+
+# TTS synthesis itself is NOT a pip package -- it shells out to a separately-built binary,
+# breeze-cli.exe from https://github.com/HoppouAI/Breeze-TTS-2.cpp (a C++/ggml/CUDA port of
+# BreezeBlue/Breeze-TTS-2), plus a GGUF model file from
+# https://huggingface.co/HoppouAI/Breeze-TTS-2.cpp (q8_0 recommended). Build once:
+#   git clone --recursive https://github.com/HoppouAI/Breeze-TTS-2.cpp
+#   cmake -B build -G "Visual Studio 17 2022" -A x64 -DBREEZE_CUDA=ON -DBREEZE_VULKAN=OFF
+#   cmake --build build --config Release
+#   copy build/bin/Release/*.dll next to build/Release/breeze-cli.exe (different output dirs)
+# See narration.py's BREEZE_CLI_PATH/BREEZE_MODEL_PATH env vars if built to a different location.
+#
+# An earlier version of narration.py used Audio8-TTS-Preview-0.6b (transformers, in-process) --
+# superseded for being ~2-3x slower and requiring transformers<5 specifically (broken under 5.x).
+# That path is in git history if ever needed again.
