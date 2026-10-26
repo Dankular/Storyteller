@@ -1,0 +1,16 @@
+FROM node:24-bookworm-slim AS frontend
+WORKDIR /src/web
+COPY web/package*.json ./
+RUN npm ci
+COPY web ./
+RUN npm run build
+FROM python:3.12-slim
+WORKDIR /app
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+COPY novel_harness ./novel_harness
+COPY --from=frontend /src/web/dist ./web/dist
+ENV HOME=/data NOVEL_HARNESS_ROOT=/data/novels PYTHONUNBUFFERED=1
+RUN mkdir -p /data/novels
+EXPOSE 8000
+CMD ["python", "-m", "novel_harness.webapi", "--host", "0.0.0.0", "--port", "8000"]

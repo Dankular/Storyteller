@@ -19,7 +19,7 @@ from typing import Any, Optional
 
 
 DEFAULT_BASE_URL = os.environ.get("INFERDEX_BASE_URL", "https://llm.khosa.co/v1").rstrip("/")
-DEFAULT_API_KEY = "sk-28ce12a9162e449cbed628d6326910fd"
+DEFAULT_API_KEY = os.environ.get("INFERDEX_API_KEY", "")
 DEFAULT_MODEL = os.environ.get(
     "NOVEL_HARNESS_MODEL",
     os.environ.get(
